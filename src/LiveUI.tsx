@@ -1,7 +1,7 @@
 import { pinDinerPayment, type DinerPayment } from './settlement';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { computeSplit, fmt, type Item, type Person } from './engine';
-import { store, Diner, HostEngine, Reassembler, hostSend, newSession, openHost, linkFragment, parseLink, subscribe, verify, type Link, type LiveState, type Snap, validUpi } from './live';
+import { onRelayBusy, store, Diner, HostEngine, Reassembler, hostSend, newSession, openHost, linkFragment, parseLink, subscribe, verify, type Link, type LiveState, type Snap, validUpi } from './live';
 import { PayOptions, Qr } from './Pay';
 import { shareBase } from './site';
 
@@ -30,6 +30,9 @@ export async function recoverHostIdentity(tableId: string, previous: any) {
     return { ...previous, link: v.link, priv: v.priv, eng: v.eng };
 }
 
+function useRelayBusy() { const [busy, setBusy] = useState(false); useEffect(() => onRelayBusy(setBusy), []); return busy; }
+const BusyNote = () => <p className="lv-warn" role="status">The free relay is busy. Retrying automatically. Keep this page open.</p>;
+
 export type HostSession = { link: Link; status: 'connecting' | 'live' | 'reconnecting'; sent: number; failed: boolean; log: string[]; closed: boolean };
 type HostSnap = Snap & { items: Item[]; people: Person[] };
 
@@ -46,7 +49,7 @@ export function useHost(read: () => HostSnap, write: (p: Partial<Snap>) => void,
             if (!eng.current || !keys.current) return;
             const engine = eng.current; const g = generation.current; const link = engine.link;
             try { const ok = await hostSend(link, keys.current, engine.state()); if (ok) lastSent.current = Date.now(); if (g !== generation.current || eng.current !== engine) return; setSess((s) => (s ? { ...s, ...(ok ? { sent: Date.now() } : {}), failed: !ok } : s)); } catch { if (g === generation.current && eng.current === engine) setSess((s) => (s ? { ...s, failed: true } : s)); }
-        }, 1200);
+        }, 2000); // one relay message for a burst of picks
     };
     const persist = async () => { const g = generation.current; const engine = eng.current, key = keys.current; if (engine && key) { const priv = await crypto.subtle.exportKey('jwk', key); if (g !== generation.current || eng.current !== engine) return; hs.set({ link: engine.link, priv, eng: eng.current.dump(), snap: (() => { const x = read(); return { items: x.items, charges: x.charges, people: x.people, claims: x.claims, shares: x.shares, chargeMode: x.chargeMode, spread: x.spread, printedTotal: x.printedTotal, tableId: x.tableId, settlement: x.settlement, externalCollector: x.externalCollector }; })() }); } };
     const run = (link: Link, signKey: CryptoKey, saved?: any) => {
@@ -89,7 +92,7 @@ export function useHost(read: () => HostSnap, write: (p: Partial<Snap>) => void,
 }
 
 export function HostPanel({ s, host, goClaim, removePerson, setPay }: { s: HostSnap & { collectorId: string; collectorMode?: 'diner' | 'external'; externalCollector?: string; upi?: string; hostName?: string; approved?: string[] }; setPay: (p: { collectorMode?: 'diner' | 'external'; externalCollector?: string; upi?: string; hostName?: string; collectorId?: string; received?: Record<string, number>; approved?: string[] }) => void; host: ReturnType<typeof useHost>; goClaim: (personId?: string) => void; removePerson: (id: string) => void }) {
-    const { sess } = host; useEffect(()=>{if(!sess&&!s.collectorMode)setPay({collectorMode:'diner',externalCollector:undefined});},[!!sess,s.collectorMode]);const [copied, setCopied] = useState(false); const [dn, setDn] = useState(s.hostName ?? ''); const [du, setDu] = useState(s.upi ?? ''); useEffect(() => { setDn(s.hostName ?? ''); setDu(s.upi ?? ''); }, [!!sess]); const payOk = validUpi(s.upi); const dirty = dn.trim() !== (s.hostName ?? '').trim() || du.trim() !== (s.upi ?? '').trim();
+    const { sess } = host; const busy = useRelayBusy(); useEffect(()=>{if(!sess&&!s.collectorMode)setPay({collectorMode:'diner',externalCollector:undefined});},[!!sess,s.collectorMode]);const [copied, setCopied] = useState(false); const [dn, setDn] = useState(s.hostName ?? ''); const [du, setDu] = useState(s.upi ?? ''); useEffect(() => { setDn(s.hostName ?? ''); setDu(s.upi ?? ''); }, [!!sess]); const payOk = validUpi(s.upi); const dirty = dn.trim() !== (s.hostName ?? '').trim() || du.trim() !== (s.upi ?? '').trim();
     const [approveErr,setApproveErr]=useState('');useEffect(()=>{if(!sess||s.collectorMode!=='diner'||!s.collectorId)return;const k='chit.autoclaim.'+sess.link.topic;try{if(localStorage.getItem(k))return;localStorage.setItem(k,'1');}catch{return;}goClaim(s.collectorId);},[!!sess,s.collectorId]);
     const res = useMemo(() => computeSplit({ ...s, spread: false }), [s]);
     const url = sess ? `${JOIN_BASE}#${linkFragment(sess.link)}` : '';
@@ -98,7 +101,7 @@ export function HostPanel({ s, host, goClaim, removePerson, setPay }: { s: HostS
     if (!sess) return <section className="lv-card"><h2>Start with your plate</h2><p>Enter your name, claim what you ate, then invite friends by link or QR.</p><details><summary>How QR sharing and recovery work</summary><p className="sb-muted sb-small">Picks travel end-to-end encrypted through a free public relay (ntfy.sh). The relay sees only scrambled data, but it is best-effort with no uptime promise. The join link holds the key.</p><p className="lv-warn"><b>Keep this page open.</b> The table runs from this phone. If the page reloads, this phone tries to resume the same table from its own saved copy. That is not guaranteed, and everyone sees "Lost the host" until it does.</p></details><div className="ch-payee"><p>You are hosting and dining.</p><details><summary>Someone else is collecting, or I am not dining</summary><div className="sb-pills" role="radiogroup" aria-label="Collector type"><button type="button" role="radio" aria-checked={s.collectorMode === 'external'} onClick={() => setPay({ collectorMode: 'external', collectorId: '', externalCollector: s.hostName ?? '' })}>Not dining</button><button type="button" role="radio" aria-checked={s.collectorMode === 'diner'} onClick={() => setPay({ collectorMode: 'diner', externalCollector: undefined, collectorId: '' })}>I am dining too</button></div></details><label className="sb-label" htmlFor="hn">Your name</label><input id="hn" className="lv-in" value={s.hostName ?? ''} maxLength={30} placeholder="Your name" onChange={(e) => setPay({ hostName: e.target.value, ...(s.collectorMode === 'external' ? { externalCollector: e.target.value, collectorId: '' } : {}) })} /><details><summary>Payment details (optional for now)</summary><label className="sb-label" htmlFor="hupi">Collector UPI ID</label><input id="hupi" className="lv-in" inputMode="email" autoCapitalize="none" autoCorrect="off" placeholder="name@bank" value={s.upi ?? ''} onChange={(e) => setPay({ upi: e.target.value })} />{(s.upi ?? '').trim() && !validUpi(s.upi) && <p className="lv-rej">That does not look like a UPI ID (name@bank). Save a valid ID for the collector record. Payment links appear only after host finalization and diner review.</p>}<p className="sb-muted sb-small">Everyone at the table sees this ID and name (encrypted in transit). Only you can change it, from this phone. Nothing is paid from here.</p></details></div><button className="sb-btn sb-block" type="button" onClick={host.start} disabled={!s.items.length || !s.collectorMode || (s.collectorMode==='diner'&&!(s.hostName??'').trim()) || host.starting}>{host.starting?'Opening table…':s.items.length ? (s.collectorMode==='external'?'Open the table':'Pick my food') : 'Add the bill first'}</button>{!s.collectorMode&&<p className="lv-warn" role="status">Choose whether the collector is dining above before opening the table.</p>}{s.collectorMode==='diner'&&!(s.hostName??'').trim()&&<p className="lv-warn">Enter your name above so you can claim your own dishes on this phone.</p>}{host.startError&&<p className="lv-warn" role="alert">{host.startError}</p>}</section>;
     return <section className="lv-card">
         <h2>{sess.closed ? 'Table closed' : 'Scan to join'}</h2>
-        {!sess.closed && <><Qr text={url} /><p className="sb-small lv-status" data-s={sess.status}>{sess.status === 'live' ? '● Connected to the relay' : sess.status === 'connecting' ? '○ Connecting…' : '○ Reconnecting. New joins may be delayed.'}{sess.failed ? ' · Last update to diners failed, retrying on the next change.' : ''}</p>
+        {!sess.closed && <><Qr text={url} /><p className="sb-small lv-status" data-s={sess.status}>{sess.status === 'live' ? '● Connected to the relay' : sess.status === 'connecting' ? '○ Connecting…' : '○ Reconnecting. New joins may be delayed.'}{sess.failed ? ' · Last update to diners failed, retrying on the next change.' : ''}</p>{busy && <BusyNote />}
             <a className="sb-btn sb-block sb-a" href={url} target="_blank" rel="noopener noreferrer">Open join link</a><button className="sb-link" type="button" onClick={async () => { try { await navigator.clipboard.writeText(url); setCopied(true); } catch { setCopied(false); } }}>{copied ? 'Link copied' : 'Copy join link'}</button><p className="sb-small">Send the copied link to diners. Tapping it opens this same table without scanning the QR. The link contains the table key, so keep it inside your group.</p>
             <p className="sb-muted sb-small">Anyone with this link can join and see the bill. Keep it inside your group. Keep this page open while people join. If it reloads, the table tries to resume with the same link. Diners see "Lost the host" until it does.</p></>}
         <h3>Who is here ({s.people.length})</h3>{s.collectorMode==='diner'&&s.collectorId&&s.people.some(p=>p.id===s.collectorId)&&<button className="sb-btn sb-block" type="button" onClick={()=>goClaim(s.collectorId)}>Claim my dishes on this phone</button>}
@@ -158,12 +161,14 @@ export function DinerApp({ link }: { link: Link }) {
     }, [st?.rev]);
     const push = (c: Record<string, number>, s2: string[]) => {
         setWant(c); setSh(s2); dirty.current = true; clearTimeout(sendT.current);
-        sendT.current = setTimeout(async () => { const n = (d.current!.n += 1); setMyN(n); d.current!.save(name); dirty.current = false; const ok = await (await d.current!.claimsRaw(c, s2, n)); setSendFail(!ok); }, 500);
+        sendT.current = setTimeout(async () => { const n = (d.current!.n += 1); setMyN(n); d.current!.save(name); dirty.current = false; const ok = await (await d.current!.claimsRaw(c, s2, n)); setSendFail(!ok); }, 1500);
     };
-    const join = async () => { d.current = await new Diner(link).init(); setSeatId(d.current.pid); const ok = await d.current.join(name.trim() || 'Guest'); setJoined(ok); setJoinAt(Date.now()); if (!ok) setSendFail(true); else await d.current.save(name.trim() || 'Guest'); };
+    const [joining, setJoining] = useState(false); const busy = useRelayBusy();
+    // A retry after a slow or rate-limited join reuses the same seat, so the host never sees a duplicate.
+    const join = async () => { if (joining) return; setJoining(true); setSendFail(false); try { const nm = name.trim() || 'Guest'; if (!d.current) { d.current = await new Diner(link).init(); setSeatId(d.current.pid); } await d.current.save(nm); const ok = await d.current.join(nm); setJoined(ok); setJoinAt(Date.now()); if (!ok) setSendFail(true); } finally { setJoining(false); } };
     useEffect(() => { (async () => { const x = new Diner(link); const nm = await x.restore(); if (nm) { d.current = x; setSeatId(x.pid); setName(nm); setMyN(x.n); await x.join(nm); setJoined(true); setJoinAt(Date.now()); } })(); }, []);
     if (st && !st.open) return <section className="lv-card"><h2>The table is closed</h2><p>The host closed this session. Your last picks are with the host.</p></section>;
-    if (!joined) return <section className="lv-card"><h2>Join the table</h2><p>Add your name, then tick what you had.</p><input className="lv-in" aria-label="Your name" placeholder="Your name" maxLength={24} value={name} onChange={(e) => setName(e.target.value)} /><button className="sb-btn sb-block" type="button" disabled={!name.trim()} onClick={join}>Join</button>{sendFail && <p className="lv-warn">Could not reach the relay. Check your connection and try again.</p>}</section>;
+    if (!joined) return <section className="lv-card"><h2>Join the table</h2><p>Add your name, then tick what you had.</p><input className="lv-in" aria-label="Your name" placeholder="Your name" maxLength={24} value={name} onChange={(e) => setName(e.target.value)} /><button className="sb-btn sb-block" type="button" disabled={!name.trim() || joining} onClick={join}>{joining ? 'Joining…' : 'Join'}</button>{joining && busy && <BusyNote />}{sendFail && <p className="lv-warn">Could not reach the relay. Check your connection and try again.</p>}</section>;
     const stale = lastSeen > 0 && now - lastSeen > HOST_LOST;
     if (!me) return <section className="lv-card"><h2>{st ? 'You are not on the list' : 'Waiting for the host…'}</h2>{st ? <p>This seat is not on the host list. The table may already be finalized, or the host may have removed the seat. Reloading will not add you. Ask the host for a new table if you need to join.</p> : now - joinAt > 25000 ? <p className="lv-warn">The host has not answered. Check the host phone is open and online, then reload this link.</p> : <p className="sb-muted">Connecting ({relay}).</p>}</section>;
     const acked = (st!.ack[pid] ?? 0) >= myN && !dirty.current;
@@ -178,6 +183,7 @@ export function DinerApp({ link }: { link: Link }) {
     return <section className="lv-card">
         <h2>Hi {me.n}</h2>
         {stale && <p className="lv-warn" role="alert">Lost the host. Your picks are not saved until it is back. Keep this page open.</p>}
+        {busy && <BusyNote />}
         {sendFail && <p className="lv-warn" role="alert">Your last pick did not reach the relay. Change anything to retry.</p>}
         {unclaimed.length > 0 && <div className="lv-warn"><b>Nobody has had yet:</b> {unclaimed.map((i) => i.n).join(', ')}</div>}
         <ul className="lv-list">{st!.items.map((i) => {

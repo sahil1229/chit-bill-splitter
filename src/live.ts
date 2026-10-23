@@ -71,12 +71,18 @@ export async function verify(pub: string, p: string, s: string) {
 }
 
 // ---- transport ----
-export async function publish(topic: string, body: string, tries = 4): Promise<boolean> {
+/** ntfy.sh rate-limits per internet address (about 60 requests, then one per 5s); phones on one wifi share it. */
+const busyListeners = new Set<(busy: boolean) => void>();
+export function onRelayBusy(cb: (busy: boolean) => void) { busyListeners.add(cb); return () => { busyListeners.delete(cb); }; }
+const setBusy = (b: boolean) => busyListeners.forEach((cb) => cb(b));
+export async function publish(topic: string, body: string, tries = 8): Promise<boolean> {
     for (let i = 0; i < tries; i++) {
         try {
             const r = await fetch(`${RELAY}/${topic}`, { method: 'POST', body });
-            if (r.ok) return true;
-            if (r.status === 429) await sleep(10000); else if (r.status >= 400 && r.status < 500) return false;
+            if (r.ok) { setBusy(false); return true; }
+            // Rate limited: wait for the allowance to refill rather than giving up.
+            if (r.status === 429) { setBusy(true); await sleep(Math.min(5000 * (i + 1), 20000)); continue; }
+            if (r.status >= 400 && r.status < 500) return false;
         } catch { /* network */ }
         await sleep(800 * (i + 1));
     }
@@ -86,7 +92,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Streaming subscribe with reconnect, replay of the 12h cache, delayed re-poll (the cache is eventually consistent) and dedupe by relay id. */
 export function subscribe(topic: string, onMsg: (body: string) => void, onStatus: (s: 'connecting' | 'live' | 'reconnecting') => void) {
-    let stop = false; const seen = new Set<string>(); let ctl: AbortController | null = null; let last = '';
+    let stop = false; const seen = new Set<string>(); let ctl: AbortController | null = null; let last = ''; let polled = false;
     const deliver = (line: string) => {
         if (!line.trim()) return;
         try { const e = JSON.parse(line); if (e.event === 'message' && e.id && !seen.has(e.id)) { seen.add(e.id); last = e.id; if (typeof e.message === 'string' && !e.attachment) onMsg(e.message); } } catch { /* ignore */ }
@@ -101,7 +107,7 @@ export function subscribe(topic: string, onMsg: (body: string) => void, onStatus
                 const r = await fetch(`${RELAY}/${topic}/json?since=${last || 'all'}`, { signal: ctl.signal });
                 if (!r.ok || !r.body) throw new Error(String(r.status));
                 onStatus('live'); delay = 1500;
-                setTimeout(poll, 3500);
+                if (!polled) { polled = true; setTimeout(poll, 3500); } // one catch-up poll per page, not per reconnect
                 const rd = r.body.getReader(); let buf = '';
                 for (;;) { const { done, value } = await rd.read(); if (done) break; buf += dec.decode(value, { stream: true }); const lines = buf.split('\n'); buf = lines.pop() ?? ''; lines.forEach(deliver); }
             } catch { /* fallthrough */ }

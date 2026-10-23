@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { dish, expectNoHorizontalScroll, phone, upiParams } from './helpers';
-import { noProblems } from './helpers';
+import { noProblems, problems } from './helpers';
 
 test.afterEach(noProblems);
 
@@ -193,4 +193,29 @@ test('live: 6 naans eaten 2, 1 and 3 on separate phones are charged by count', a
     await host.getByRole('button', { name: /^Approve Bilal/ }).click();
     await phones.Bilal.getByRole('button', { name: 'I checked these details' }).click();
     expect(upiParams((await phones.Bilal.locator('a[data-app="gpay"]').getAttribute('href'))!)).toMatchObject({ pa: 'mom@oksbi', am: '60.00' });
+});
+
+test('live: a rate-limited join waits, shows the relay is busy, and keeps one seat', async ({ browser, request }) => {
+    test.skip(!!process.env.CHIT_URL, 'needs the local relay to simulate rate limits');
+    const host = await phone(browser, 'pixel');
+    await hostBill(host);
+    await host.fill('#hn', 'Sahil');
+    await host.getByRole('button', { name: 'Pick my food' }).click();
+    await host.getByRole('button', { name: 'Done, invite friends' }).click();
+    const url = await joinUrl(host);
+    const asha = await phone(browser, 'pixel');
+    await asha.goto(url);
+    await asha.getByLabel('Your name').fill('Asha');
+    await request.post('http://localhost:4174/__limit?n=2');
+    await asha.getByRole('button', { name: 'Join' }).click();
+    await expect(asha.getByText('The free relay is busy. Retrying automatically.')).toBeVisible();
+    await expect(asha.getByRole('heading', { name: 'Hi Asha' })).toBeVisible({ timeout: 40_000 });
+    await expect(host.getByRole('heading', { name: 'Who is here (2)' })).toBeVisible();
+    await pick(asha, 'Paneer Tikka');
+    await saved(asha);
+    await asha.reload();
+    await expect(asha.getByRole('heading', { name: 'Hi Asha' })).toBeVisible();
+    await expect(host.getByRole('heading', { name: 'Who is here (2)' })).toBeVisible();
+    // The simulated 429s are logged by the browser; anything else still fails the test.
+    problems.splice(0, problems.length, ...problems.filter((p) => !p.includes('status of 429')));
 });

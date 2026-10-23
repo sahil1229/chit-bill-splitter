@@ -2,15 +2,17 @@
 // Like ntfy.sh, bodies over 4096 bytes become attachments, so their text never reaches subscribers.
 import http from 'node:http';
 const port = Number(process.env.RELAY_PORT || 4174);
-const topics = new Map(); let seq = 0;
+const topics = new Map(); let seq = 0; let limited = 0; // POST /__limit?n=N: the next N publishes get 429, like ntfy.sh's rate limit
 const list = (t) => topics.get(t) ?? (topics.set(t, { msgs: [], subs: new Set() }), topics.get(t));
 const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' };
 http.createServer((req, res) => {
   const url = new URL(req.url, 'http://x'); const parts = url.pathname.split('/').filter(Boolean);
   if (req.method === 'OPTIONS') { res.writeHead(204, cors); return res.end(); }
   if (url.pathname === '/health') { res.writeHead(200, cors); return res.end('ok'); }
+  if (url.pathname === '/__limit') { limited = Number(url.searchParams.get('n') || 0); res.writeHead(200, cors); return res.end('ok'); }
   const topic = parts[0]; if (!topic) { res.writeHead(404, cors); return res.end(); }
   const t = list(topic);
+  if ((req.method === 'POST' || req.method === 'PUT') && limited > 0) { limited--; req.resume(); res.writeHead(429, cors); return res.end('{"code":42901,"error":"limit reached: too many requests"}'); }
   if (req.method === 'POST' || req.method === 'PUT') {
     let body = ''; req.on('data', (c) => (body += c)); req.on('end', () => {
       const id = 'm' + (++seq).toString().padStart(8, '0');
