@@ -2,7 +2,8 @@ import type { Settlement } from './settlement';
 // Own-phone mode: end-to-end encrypted relay over ntfy.sh. Host is authoritative; diners can only change their own claims.
 import { allocate, computeSplit, type Charge, type ChargeMode, type Claims, type Item, type Person, type Shares } from './engine';
 
-const RELAY = 'https://ntfy.sh';
+// Tests point this at a local ntfy-compatible relay; production uses the public ntfy.sh.
+const RELAY: string = (import.meta as any).env?.VITE_RELAY || 'https://ntfy.sh';
 const enc = new TextEncoder(); const dec = new TextDecoder();
 export const b64u = (b: ArrayBuffer | Uint8Array) => { const u = b instanceof Uint8Array ? b : new Uint8Array(b); let s = ''; u.forEach((x) => (s += String.fromCharCode(x))); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); };
 export const unb64u = (s: string) => { const t = atob(s.replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((s.length + 3) % 4)); const u = new Uint8Array(t.length); for (let i = 0; i < t.length; i++) u[i] = t.charCodeAt(i); return u; };
@@ -170,7 +171,7 @@ export class HostEngine {
             if (snap.people.some((p) => p.id === pid)) return false;
             let name = cleanName(d.name) || 'Guest'; const base = name; let k = 2;
             while (snap.people.some((p) => p.name.toLowerCase() === name.toLowerCase())) name = `${base} (${k++})`;
-            if (snap.people.length >= 20) return false;
+            if (snap.people.length >= 30) return false; // same cap the settlement accepts
             this.write({ people: [...snap.people, { id: pid, name }] });
             return true;
         }

@@ -9,6 +9,8 @@ export type ReportInput = {
     externalCollector?: string;
     upi: string;
     received: Record<string, boolean>;
+    /** Per-person pay links, only once the table is frozen and the person approved. */
+    payLinks?: Record<string, string>;
     printedTotal?: number | null;
     chargeMode: 'equal' | 'prorata';
     spread: boolean;
@@ -40,6 +42,7 @@ export function whatsappText(r: ReportInput): string {
         if (p.id === r.collectorId) continue;
         const st = statusOf(r, p.id) === 'nothing' ? ' (nothing to pay)' : statusOf(r, p.id) === 'received' ? ' ✅ received' : '';
         L.push(`• ${p.name}: *${fmt(p.total)}*${st}`);
+        if (r.payLinks?.[p.id] && statusOf(r, p.id) === 'waiting') L.push(`  Pay: ${r.payLinks[p.id]}`);
     }
     const mine = r.res.people.find((p) => p.id === r.collectorId);
     if (mine && !r.externalCollector) L.push(`• ${col.name}: ${fmt(mine.total)} (own share, collecting)`);

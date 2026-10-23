@@ -2,3 +2,6 @@ node_modules
 dist
 .netlify
 public/ocr
+dist-test
+test-results
+playwright-report

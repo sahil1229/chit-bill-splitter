@@ -249,7 +249,7 @@ body { background: #f4f0e6; }
 .sb-tile-claim em { font-style: normal; font-weight: 800; font-size: 11px; background: var(--sb-pop); color: var(--k); border: 2px solid var(--k); padding: 1px 5px; }
 .sb-badge { position: absolute; top: -10px; right: -6px; background: var(--k); color: var(--sb-pop); font-weight: 900; font-size: 18px; min-width: 34px; height: 34px; display: grid; place-items: center; padding: 0 6px; pointer-events: none; transform: rotate(6deg); }
 .sb-minus { position: absolute; bottom: 4px; right: 4px; width: 44px; height: 44px; border: 3px solid var(--k); background: #fff; font-weight: 900; font-size: 22px; }
-.sb-ticker { background: var(--k); color: #fff; border-top: 0; padding: 12px 14px calc(12px + env(safe-area-inset-bottom)); margin: 0 -2px; }
+.sb-ticker { background: var(--k); color: #fff; border-top: 0; padding: 12px 14px calc(12px + env(safe-area-inset-bottom)); margin: 0; }
 .sb-ticker strong { font-size: 30px; color: var(--sb-pop); letter-spacing: -0.04em; }
 .sb-ticker .sb-btn { background: var(--sb-pop); color: var(--k); border-color: #fff; box-shadow: 4px 4px 0 var(--sb-pink); }
 .sb-receipt { background: #fff; border: 4px solid var(--k); box-shadow: 8px 8px 0 var(--k); padding: 14px 16px 16px; display: grid; gap: 8px; background-image: radial-gradient(circle at 10px 100%, #f4f0e6 8px, transparent 9px); background-size: 20px 20px; background-repeat: repeat-x; background-position: 0 100%; padding-bottom: 28px; }
@@ -478,3 +478,13 @@ html, body, #root { background: #FBF7ED; }
 .lv-collect label { display: grid; gap: 5px; margin: 8px 0; }
 .lv-collect input { box-sizing: border-box; width: 100%; min-width: 0; min-height: 44px; font: inherit; padding: 8px; }
 .sb-note { background: #fffdf5 !important; border: 1px dashed #1C1917 !important; color: #1C1917 !important; }
+/* Pay options: app buttons, UPI QR and copy fallbacks on the payer's phone. */
+.ch-paybox { display: grid; gap: 8px; min-width: 0; }
+.ch-paybox .sb-btn { text-align: center; }
+.ch-apps { display: flex; flex-wrap: wrap; gap: 8px 14px; }
+.ch-apps .sb-btn { flex: 1 1 120px; }
+.ch-paybox .lv-qr { width: min(100%, 260px); }
+.sb-person .ch-paybox { margin-top: 8px; padding-top: 8px; border-top: 1px dotted #b9ae96; }
+/* Long UPI IDs and names must wrap instead of widening cards past a 320px screen. */
+.sb-card, .lv-card, .sb-person, .ch-paybox { min-width: 0; overflow-wrap: anywhere; }
+.ch-apps a.sb-link { text-decoration: underline; text-underline-offset: 3px; font-weight: 700; }

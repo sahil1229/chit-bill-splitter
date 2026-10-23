@@ -9,25 +9,37 @@ Phone-first bill splitting with one-phone pass-around and QR diner mode. Paste o
     npm run typecheck
     npm run build
     npm run preview
+    npm test          # unit + phone-sized browser tests (Playwright)
 
-Deploy the Vite output in `dist` as a static HTTPS site. QR collaboration uses the public ntfy.sh relay. Join links contain the table encryption key; share only with diners. Keep the host online while claiming.
+First time only: `npx playwright install chromium`. Tests build the app against a local ntfy-compatible relay (`tests/relay.mjs`), so they never use the public relay's quota. Like ntfy.sh, that relay turns bodies over 4096 bytes into attachments, so a message-size regression fails the tests.
+
+Deploy the Vite output in `dist` as a static HTTPS site. QR collaboration uses the public ntfy.sh relay (set `VITE_RELAY` at build time to use another ntfy server). Join links carry the table encryption key in the `#` fragment, which browsers never send to the web server; share them only with diners. Keep the host online while claiming.
+
+### Live relay limits
+
+- ntfy.sh allows anonymous users 250 messages per IP per 12 hours, and bodies up to 4096 bytes. Phones on the same restaurant wifi share one IP.
+- CHIT compresses each signed, encrypted update and splits it only if needed; a finalized 60-item, 30-diner table still fits in one message.
+- The host re-announces a quiet table every 75 seconds and groups bursts of picks into one update. Diners show "Lost the host" after 3 minutes without an update.
 
 ## Payment workflow
 
 1. Host checks the printed total, every dish, each person's share and collector name/UPI ID.
 2. Host explicitly reviews and freezes the table. Bill, people, claims and collector become immutable for that table.
 3. Each diner checks the signed, frozen collector and their own amount. Payment links appear only after review and a durable browser pin. Conflicting finalized details block payment for that table/seat, including after reload.
-4. Check payee and amount again in the UPI app. Opening an app is not payment confirmation. The collector marks received manually.
+4. Each payer pays from their own phone:
+   - Separate phones: after the host approves them, the diner's screen shows pay buttons. Android gets one "Pay with a UPI app" button (Android's own app chooser) plus Google Pay, PhonePe and Paytm. iPhone gets Google Pay (`gpay://`), PhonePe (`phonepe://`), Paytm (`paytmmp://`) and Other UPI app (`upi://`), because iOS cannot choose between apps that all claim `upi://`.
+   - One phone: on the collector's phone, each person gets "Show QR" (a standard UPI QR any UPI app can scan) and "Send a pay link". The pay link opens CHIT's pay screen with the same app buttons on the payer's phone.
+   - Every pay screen also has the UPI QR, "Save QR image" (for "scan from gallery") and copy buttons. If no app opens within 2.5 seconds, the page says so.
+5. Check payee and amount again in the UPI app. Opening an app is not payment confirmation. The collector marks received manually.
 
 Corrections require a new table. Old UPI links already opened in another app cannot be revoked. Tell diners about corrections before asking anyone to pay again. Web Locks and persistent browser storage are required; unsupported or failed storage blocks finalization/payment instead of guessing.
 
 ## Status: tested preview, not production ready
 
 - Photo OCR preview: Read photo uses a same-origin Tesseract7 worker and English model. Photo pixels stay in browser. JPEG/PNG/WebP under 15 MB and 24 MP only, scaled to 2200px; HEIC unsupported. Text must be checked before explicit parsing. Timeout 60s, cancellation supported. Synthetic desktop test passed, not real receipt/iPhone quality proof. Build copies worker/model assets to dist/ocr (~54MB); do not omit those files when deploying. iPhone Live Text remains an alternative.
-- Actual iPhone UPI app launch, bank/payee resolution, iOS share sheets and real payments are untested. CHIT never verifies a bank payment.
-- Local Chrome tests cover two diners, allocation, external collector, explicit finalization, reload, review gating, wrong/conflicting pin data, storage failures and concurrent tables. Independent source/browser checks were bounded, not every possible workflow.
-- One bounded synthetic test against the real ntfy.sh relay passed: two diners claimed, shares matched, host finalized, correct per-diner review links appeared, and host reload retained identity/settlement. This is not an uptime, latency or outage guarantee.
-- Representative photo review, finalized external/diner collector and blocked-relay screens were checked at 320px. Not all screens, devices or browsers have been checked.
+- Pay links and QR codes are tested for exact payee, name and amount. Every generated QR was decoded back with an independent reader. Opening real UPI apps on real phones, bank/payee resolution, iOS share sheets and real payments are untested. CHIT never verifies a bank payment.
+- `npm test` covers the split maths, parser, settlement tampering, payment pin conflicts, relay envelope (size, forgery, replay, host reload), UPI links, and phone-sized browser journeys: one-phone mode end to end (QR, pay link opened on a second phone, mark received, WhatsApp text, PDF, reload, new bill), live mode with an Android and an iPhone diner (join, remove, diner and host reloads, freeze, approve, per-platform pay buttons), collector not dining, join by pasted link, closing a table, on-device photo reading, and 320px layouts. Tests fail on any page or console error.
+- A full live run against the real ntfy.sh relay passed (host, two diners, host reload, freeze, approve, pay buttons). This is not an uptime, latency or outage guarantee.
 - Blocked relay requests show a reconnecting warning; offline use is not supported. The public relay is best-effort. Reload recovery requires the same browser storage.
 - OCR/text can misread prices and item layout. Existing-item replacement asks before clearing claims/shares. Scanning asks before replacing nonempty text. Try sample is an explicit text replacement and may replace text with no items without another prompt.
 - Parser ambiguities show CHECK warnings; always compare the edited bill with the original, including discounts and printed total.

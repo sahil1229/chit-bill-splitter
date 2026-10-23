@@ -2,7 +2,7 @@ import { pinDinerPayment, type DinerPayment } from './settlement';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { computeSplit, fmt, type Item, type Person } from './engine';
 import { store, Diner, HostEngine, Reassembler, hostSend, newSession, openHost, linkFragment, parseLink, subscribe, verify, type Link, type LiveState, type Snap, validUpi } from './live';
-import { qrMatrix } from './qr';
+import { PayOptions, Qr } from './Pay';
 
 export const JOIN_BASE = location.origin + location.pathname;
 /** ntfy.sh allows 250 messages per IP per 12h, so a quiet table only re-announces itself this often. */
@@ -14,13 +14,6 @@ export function envLink(): Link | null {
     for (const s of [location.hash, location.search, window.name]) { const l = parseLink(decodeURIComponent(s || '')); if (l) return l; }
     return null;
 }
-function Qr({ text }: { text: string }) {
-    const m = useMemo(() => { try { return qrMatrix(text); } catch { return null; } }, [text]);
-    if (!m) return <p className="sb-muted">Link too long for a QR.</p>;
-    const n = m.length; const q = 3;
-    return <svg className="lv-qr" data-url={text} viewBox={`0 0 ${n + q * 2} ${n + q * 2}`} role="img" aria-label="QR code to join the table" shapeRendering="crispEdges"><rect width="100%" height="100%" fill="#fff" />{m.map((r, y) => r.map((b, x) => (b ? <rect key={`${x}-${y}`} x={x + q} y={y + q} width="1" height="1" fill="#111" /> : null)))}</svg>;
-}
-
 export async function recoverHostIdentity(tableId: string, previous: any) {
     if (!previous?.link?.topic) throw Error('Missing saved host table link.');
     const text = localStorage.getItem('chit.identity.' + previous.link.topic);
@@ -176,10 +169,9 @@ export function DinerApp({ link }: { link: Link }) {
     if (st!.settlement) {
         const currentPayment = payment?.settlementId === st!.settlement.id && payment?.digest === st!.settlement.digest;
         const reviewed = !!payment && currentPayment && paymentReviewed === payment.digest;
-        const payUrl = payment ? `upi://pay?pa=${encodeURIComponent(payment.upi)}&pn=${encodeURIComponent(payment.name)}&am=${(payment.amount / 100).toFixed(2)}&cu=INR&tn=${encodeURIComponent('CHIT ' + payment.settlementId.slice(0, 8))}` : '';
         const myShare = st!.settlement.shares.find((x) => x.personId === seatId);
         if (!(st!.approved ?? []).includes(seatId ?? '')) return <section className="lv-card"><h2>Table finalized for {me.n}</h2>{myShare && !myShare.owesCollector ? <p>You are the collector. Nothing to send.</p> : myShare && myShare.amount === 0 ? <p>Nothing to pay.</p> : <p>Waiting for the host to approve your payment. No pay button until then.</p>}</section>;
-        return <section className="lv-card"><h2>Finalized for {me.n}</h2>{paymentError ? <p className="lv-warn" role="alert">{paymentError}</p> : (!payment || !currentPayment) ? <p>Checking and saving the signed settlement. No payment links yet.</p> : <><div className="lv-total"><span>Your frozen amount</span><b>{fmt(payment.amount)}</b></div><p>Collector: {payment.name}<br />UPI ID: {payment.upi}<br />Settlement: {payment.settlementId.slice(0, 8)}</p>{!payment.owesCollector ? <p>You are the collector. Do not transfer your own share to yourself.</p> : payment.amount === 0 ? <p>Nothing to pay.</p> : !reviewed ? <><p className="lv-warn">Check the collector name, UPI ID and amount with your host before opening your payment app.</p><button type="button" className="sb-btn" onClick={() => setPaymentReviewed(payment.digest)}>I checked these details</button></> : <div className="ch-pay lv-paybox"><a className="sb-btn" href={payUrl.replace('upi://', 'gpay://upi/')}>Open Google Pay · {fmt(payment.amount)}</a><a className="sb-link" href={payUrl}>Other UPI app</a><button type="button" className="sb-link" onClick={() => { void navigator.clipboard.writeText(`${payment.upi} ${(payment.amount / 100).toFixed(2)}`).catch(() => setPaymentError('Could not copy. Enter the shown ID and amount manually.')); }}>Copy ID + amount</button><p className="sb-small">Check again in your payment app. Opening the app does not mean paid. The collector records received payments by hand.</p></div>}</>}<p>This settlement cannot be edited. Corrections need a new table; old payment instructions cannot be revoked.</p></section>;
+        return <section className="lv-card"><h2>Finalized for {me.n}</h2>{paymentError ? <p className="lv-warn" role="alert">{paymentError}</p> : (!payment || !currentPayment) ? <p>Checking and saving the signed settlement. No payment links yet.</p> : <><div className="lv-total"><span>Your frozen amount</span><b>{fmt(payment.amount)}</b></div><p>Collector: {payment.name}<br />UPI ID: {payment.upi}<br />Settlement: {payment.settlementId.slice(0, 8)}</p>{!payment.owesCollector ? <p>You are the collector. Do not transfer your own share to yourself.</p> : payment.amount === 0 ? <p>Nothing to pay.</p> : !reviewed ? <><p className="lv-warn">Check the collector name, UPI ID and amount with your host before opening your payment app.</p><button type="button" className="sb-btn" onClick={() => setPaymentReviewed(payment.digest)}>I checked these details</button></> : <div className="lv-paybox"><PayOptions req={{ pa: payment.upi, pn: payment.name, am: payment.amount, tn: 'CHIT ' + payment.settlementId.slice(0, 8) }} /></div>}</>}<p>This settlement cannot be edited. Corrections need a new table; old payment instructions cannot be revoked.</p></section>;
     }
     const unclaimed = st!.items.filter((i) => !i.e && (Object.values(i.c) as number[]).reduce((a, b) => a + b, 0) === 0 && i.s.length === 0);
     return <section className="lv-card">

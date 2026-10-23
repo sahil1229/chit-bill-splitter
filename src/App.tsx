@@ -2,10 +2,12 @@ import { scanPhoto } from './ocr';
 import { SettlementJournal } from './settlement-journal';
 import type { Settlement, SettlementDraft } from './settlement';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { FileCard, useLocalState } from '@instinct/files';
+import { FileCard, useLocalState } from './shim-files';
 import { buildPdf, isFinal, pdfUnsupported, whatsappText, type ReportInput } from './report';
 import './style.css';
 import { parseLink, validUpi } from './live';
+import { PayPage, Qr } from './Pay';
+import { parsePayLink, payLink, upiUrl, type PayRequest } from './upi';
 import { recoverHostIdentity, DinerApp, HostPanel, envLink, useHost } from './LiveUI';
 import { Charge, ChargeMode, Claims, Shares, Item, Person, computeSplit, fmt, parseBill, toMinor, uid } from './engine';
 
@@ -308,6 +310,19 @@ function ClaimStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
     </div>;
 }
 
+/** On the collector's phone: the payer scans this QR or opens the pay link on their own phone. */
+function CollectFrom({ req, name, share }: { req: PayRequest; name: string; share: (text: string, ok: string) => Promise<void> }) {
+    const [qr, setQr] = useState(false);
+    const link = payLink(req);
+    return <div className="ch-paybox">
+        <div className="ch-apps">
+            <button type="button" className="sb-btn sb-small-btn" aria-expanded={qr} onClick={() => setQr(!qr)}>{qr ? 'Hide QR' : `Show QR for ${name}`}</button>
+            <button type="button" className="sb-btn sb-ghost sb-small-btn" onClick={() => share(`Hi ${name}, your share of dinner is ${fmt(req.am)}. Pay ${req.pn} (${req.pa}) here: ${link}`, `Pay link for ${name} opened in the share sheet. That is a request, not a payment.`)}>Send {name} a pay link</button>
+        </div>
+        {qr && <><Qr text={upiUrl(req)} label={`UPI QR for ${name} to pay ${fmt(req.am)}`} /><p className="sb-small sb-muted">{name} scans this with any UPI app on their own phone. It fills in {req.pn}, {req.pa} and {fmt(req.am)}.</p></>}
+    </div>;
+}
+
 /* ---------- Step 4: split ---------- */
 function SplitStep({ s, set, finalize }: { s: State; set: (p: Partial<State>) => void; finalize: () => Promise<void> }) {
     const res = useMemo(() => computeSplit(s), [s]);
@@ -323,15 +338,14 @@ function SplitStep({ s, set, finalize }: { s: State; set: (p: Partial<State>) =>
     const pct = owed ? Math.round((back / owed) * 100) : 0;
     const liveGate = s.mode === 'live'; const approvedFor = (id: string) => !liveGate || (s.approved ?? []).includes(id);
     const payInfoOk = !liveGate || res.people.filter((q) => q.id !== s.collectorId && q.total > 0).every((q) => (s.approved ?? []).includes(q.id));
-    const upiLink = (amt: number) => `upi://pay?pa=${encodeURIComponent(s.upi.trim())}&pn=${encodeURIComponent(collector?.name ?? '')}&am=${(amt / 100).toFixed(2)}&cu=INR&tn=${encodeURIComponent('Dinner split')}`;
+    const frozenReq = (id: string): PayRequest | null => { const st = s.settlement; const sh = st?.shares.find((x) => x.personId === id); return st && sh && sh.owesCollector && sh.amount > 0 ? { pa: st.collector.upi, pn: st.collector.name, am: sh.amount, tn: 'CHIT ' + st.id.slice(0, 8) } : null; };
     const share = async (text: string, okMsg: string) => {
         try {
             if (navigator.share) { await navigator.share({ text }); setMsg(okMsg); }
             else { await navigator.clipboard.writeText(text); setMsg('Copied. Paste it into your group chat.'); }
         } catch { setMsg('Sharing was cancelled. Nothing was sent.'); }
     };
-    const request = (p: { id?: string; name: string; total: number }) => share(`Hi ${p.name}, your share of dinner is ${fmt(p.total)}.${s.upi.trim() && (!liveGate || (p.id !== undefined && approvedFor(p.id))) ? ` Pay ${collector?.name} on UPI: ${s.upi.trim()}` : ` Please pay ${collector?.name ?? 'me'}.`}`, `Request for ${p.name} opened in the share sheet. That is a request, not a payment.`);
-    const rep: ReportInput = { externalCollector: s.externalCollector, printedTotal: s.printedTotal, res, items: s.items, charges: s.charges, people: s.people, collectorId: s.collectorId, upi: payInfoOk ? s.upi : '', received: Object.fromEntries(payers.filter((p) => s.received[p.id] === rk(p.total)).map((p) => [p.id, true])), chargeMode: s.chargeMode, spread: s.spread, date: new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) };
+        const rep: ReportInput = { externalCollector: s.externalCollector, printedTotal: s.printedTotal, res, items: s.items, charges: s.charges, people: s.people, collectorId: s.collectorId, upi: payInfoOk ? s.upi : '', received: Object.fromEntries(payers.filter((p) => s.received[p.id] === rk(p.total)).map((p) => [p.id, true])), payLinks: Object.fromEntries(payers.filter((p) => approvedFor(p.id)).flatMap((p) => { const r = frozenReq(p.id); return r ? [[p.id, payLink(r)]] : []; })), chargeMode: s.chargeMode, spread: s.spread, date: new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) };
     const fin = isFinal(rep);
     const waText = fin.ok ? whatsappText(rep) : '';
     const bad = pdfUnsupported(rep);
@@ -393,7 +407,7 @@ function SplitStep({ s, set, finalize }: { s: State; set: (p: Partial<State>) =>
                         <div className="sb-bl sb-sum"><span>Total</span><span>{fmt(p.total)}</span></div>
                     </div>}
                     {!isCollector && <div className="sb-pay">
-                        {!fin.ok ? <p className="sb-small sb-muted">Amount not final yet.</p> : p.total <= 0 ? <p className="sb-small sb-muted">Nothing to pay.</p> : done ? <p className="sb-small sb-muted">Received. Nothing more to pay.</p> : validUpi(s.upi) && s.settlement && !approvedFor(p.id) ? <p className="sb-small sb-muted">Not approved yet. Approve {p.name} in the Table step to release payment.</p> : validUpi(s.upi) && s.settlement ? <span className="ch-pay"><a className="sb-btn sb-small-btn sb-a" href={upiLink(p.total).replace('upi://', 'gpay://upi/')}>Open Google Pay · {fmt(p.total)}</a><a className="sb-link" href={upiLink(p.total)}>Other UPI app</a><button type="button" className="sb-link" onClick={async () => { try { await navigator.clipboard.writeText(`${s.upi.trim()} ${(p.total / 100).toFixed(2)}`); setMsg('Copied UPI ID and amount. Paste them into any UPI app.'); } catch { setMsg(`UPI ID ${s.upi.trim()}, amount ${(p.total / 100).toFixed(2)}`); } }}>Copy ID + amount</button></span> : !s.settlement ? <p className="sb-small sb-muted">Finalize the table before showing payment instructions.</p> : <button type="button" className="sb-btn sb-small-btn" onClick={() => request(p)}>Request {fmt(p.total)}</button>}
+                        {!fin.ok ? <p className="sb-small sb-muted">Amount not final yet.</p> : p.total <= 0 ? <p className="sb-small sb-muted">Nothing to pay.</p> : done ? <p className="sb-small sb-muted">Received. Nothing more to pay.</p> : validUpi(s.upi) && s.settlement && !approvedFor(p.id) ? <p className="sb-small sb-muted">Not approved yet. Approve {p.name} in the Table step to release payment.</p> : validUpi(s.upi) && s.settlement && frozenReq(p.id) ? <CollectFrom req={frozenReq(p.id)!} name={p.name} share={share} /> : <p className="sb-small sb-muted">Finalize the table to get a pay QR and pay link for {p.name}.</p>}
                         {p.total > 0 && <button type="button" role="switch" disabled={!s.settlement} aria-checked={done} className={`sb-got${done ? ' on' : ''}`} onClick={() => set({ received: { ...s.received, [p.id]: done ? 0 : rk(p.total) } })}>{done ? '✓ Received' : 'Mark received'}</button>}
                     </div>}
                 </li>;
@@ -422,6 +436,8 @@ function SplitStep({ s, set, finalize }: { s: State; set: (p: Partial<State>) =>
 export function App() {
     const diner = useMemo(() => envLink(), []);
     const [pasted, setPasted] = useState<ReturnType<typeof envLink>>(null);
+    const pay = useMemo(() => parsePayLink(location.hash), []);
+    if (pay) return <FileCard><div className="sb-app"><header className="sb-top"><div className="sb-title"><div className="ch-mark"><span className="ch-stars">* * *</span><h1>CHIT</h1><span className="ch-tag">THE BILL, SPLIT FAIR &amp; SQUARE</span></div></div></header><PayPage req={pay} /></div></FileCard>;
     if (diner || pasted) return <FileCard><div className="sb-app"><header className="sb-top"><div className="sb-title"><div className="ch-mark"><span className="ch-stars">* * *</span><h1>CHIT</h1><span className="ch-tag">THE BILL, SPLIT FAIR &amp; SQUARE</span></div></div></header><DinerApp link={(diner || pasted)!} /></div></FileCard>;
     return <Host onJoin={setPasted} />;
 }
