@@ -81,19 +81,21 @@ function BillStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
     const [paste, setPaste] = useState('');
     const [photo, setPhoto] = useState<string | null>(null);
     const [note, setNote] = useState('');
+    const [photoDerived,setPhotoDerived]=useState(false);
     const [photoFile,setPhotoFile]=useState<File|null>(null);
     const [scanning,setScanning]=useState(false);
     const scanRef=useRef<AbortController|null>(null);
     const scanId=useRef(0);
     useEffect(()=>()=>{scanId.current++;scanRef.current?.abort();},[]);
-    const scan=async()=>{if(!photoFile||scanning)return;if(paste.trim()&&!window.confirm('Replace the bill text with this photo scan? Your current text will be lost. Existing items stay unchanged until you explicitly read the new text.'))return;const id=++scanId.current;const controller=new AbortController();scanRef.current=controller;setScanning(true);try{const text=await scanPhoto(photoFile,controller.signal,m=>{if(id===scanId.current)setNote(m);});if(id===scanId.current){setPaste(text);setNote('Photo read. Check the text above against your bill, then tap Read items. Nothing has been assigned yet.');}}catch(e){if(id===scanId.current)setNote(e instanceof Error?e.message:'Could not read the photo. Paste text instead.');}finally{if(id===scanId.current){setScanning(false);scanRef.current=null;}}};
+    const scan=async()=>{if(!photoFile||scanning)return;if(paste.trim()&&!window.confirm('Replace the bill text with this photo scan? Your current text will be lost. Existing items stay unchanged until you explicitly read the new text.'))return;const id=++scanId.current;const controller=new AbortController();scanRef.current=controller;setScanning(true);try{const text=await scanPhoto(photoFile,controller.signal,m=>{if(id===scanId.current)setNote(m);});if(id===scanId.current){setPaste(text);setPhotoDerived(true);setNote('Photo read. Check the text above against your bill, then tap Read items. Nothing has been assigned yet.');}}catch(e){if(id===scanId.current)setNote(e instanceof Error?e.message:'Could not read the photo. Paste text instead.');}finally{if(id===scanId.current){setScanning(false);scanRef.current=null;}}};
     const fileRef = useRef<HTMLInputElement>(null);
     useEffect(() => () => { if (photo) URL.revokeObjectURL(photo); }, [photo]);
 
-    const read = (text: string) => {
+    const read = (text: string, fromPhoto=photoDerived) => {
         if(s.items.length && !window.confirm('Replace the current bill items and charges? All dish claims and shares will be cleared. People stay. Cancel to keep your current bill.'))return false;
         const r = parseBill(text);
-        if (!r.items.length) { setNote('Could not find any dishes with prices in that text. Add them by hand below.'); return; }
+        if (!r.items.length) { setNote(r.skipped.find(x=>x.startsWith('CHECK:'))??'Could not find any dishes with prices in that text. Add them by hand below.'); return false; }
+        if(fromPhoto&&(r.skipped.some(x=>x.startsWith('CHECK:'))||r.printedTotal===null||r.items.some(i=>i.total<0)||r.items.reduce((a,i)=>a+i.total,0)+r.charges.reduce((a,c)=>a+c.amount,0)!==r.printedTotal)){setNote('Photo text is not reliable enough to import: there is a quantity warning, missing total, or the amounts do not reconcile. Your current bill was kept. Retake a clear photo or add the bill manually.');return false;}
         set({ items: r.items, charges: r.charges, printedTotal: r.printedTotal, claims: {}, shares: {}, touched: {} });
         setNote(`Read ${r.items.length} items and ${r.charges.length} charges${r.skipped.filter((x) => !x.startsWith('CHECK:')).length ? `. Ignored ${r.skipped.filter((x) => !x.startsWith('CHECK:')).length} lines` : ''}. Check them against the bill.${r.skipped.filter((x) => x.startsWith('CHECK:')).length ? ' ' + r.skipped.filter((x) => x.startsWith('CHECK:')).join(' ') : ''}`);
     };
@@ -115,10 +117,11 @@ function BillStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
             <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) { scanId.current++;scanRef.current?.abort();setScanning(false);if(!/^image\/(jpeg|png|webp)$/i.test(f.type)||f.size>15*1024*1024){setPhotoFile(null);setPhoto(null);setNote('Choose JPEG, PNG or WebP under 15 MB. HEIC is not supported: use iPhone Live Text or export JPEG.');}else{setPhotoFile(f);setPhoto(URL.createObjectURL(f));setNote('');} }e.target.value=''; }} />
             <div className="sb-row-btns">
                 <button className="sb-btn" type="button" onClick={() => fileRef.current?.click()}>{photo ? 'Change photo' : 'Photo of bill'}</button>
-                <button className="sb-btn sb-ghost" type="button" disabled={scanning} onClick={() => { if(read(SAMPLE)!==false)setPaste(SAMPLE); }}>Try sample bill</button>
+                <button className="sb-btn sb-ghost" type="button" disabled={scanning} onClick={() => { if(read(SAMPLE,false)!==false){setPaste(SAMPLE);setPhotoDerived(false);} }}>Try sample bill</button>
             </div>
             {photo && <div className="sb-photo"><img src={photo} alt="The bill you photographed" />
                 <button className="sb-btn sb-block" type="button" disabled={scanning} onClick={scan}>{scanning?'Reading photo…':'Read photo on this device'}</button>{scanning&&<button type="button" className="sb-btn sb-ghost" onClick={()=>scanRef.current?.abort()}>Cancel scan</button>}<p className="sb-muted sb-small">Clear, upright JPEG/PNG/WebP under 15 MB. HEIC is not supported here: use iPhone Scan Text or export a JPEG. OCR can misread prices.</p></div>}
+            {photoDerived && <div className="sb-warn"><p>This text came from a photo. Editing it keeps the photo checks on. To type a fresh bill by hand, switch explicitly below.</p><button type="button" className="sb-btn sb-ghost" disabled={scanning} onClick={()=>{if(window.confirm('Switch to manual bill text? This clears the scanned text, not the current items. You will check every typed amount yourself.')){setPaste('');setPhotoDerived(false);setNote('Manual entry: type the bill text or add items below. Check quantities, prices and printed total yourself.');}}}>Start fresh manual bill text</button></div>}
             <label className="sb-label" htmlFor="paste">Bill text</label>
             <textarea id="paste" disabled={scanning} className="sb-input sb-area" rows={5} placeholder={'2 Butter Chicken 960.00\nService Charge 283.00'} value={paste} onChange={(e) => setPaste(e.target.value)} />
             <button className="sb-btn sb-block" type="button" disabled={scanning||!paste.trim()} onClick={() => read(paste)}>Read items from text</button>
@@ -480,4 +483,4 @@ function Host({ onJoin }: { onJoin: (l: NonNullable<ReturnType<typeof envLink>>)
             {meta.message && <p className="sb-muted sb-small">{meta.message}</p>}
         </div>
     </FileCard>;
-        }
+                                                                                                                                                                                                                                        }
