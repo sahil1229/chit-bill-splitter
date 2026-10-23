@@ -1,28 +1,35 @@
-# CHIT - split the restaurant bill
+# CHIT - restaurant bill splitting
 
-Phone-first restaurant bill splitting. Add or paste bill lines, check quantities and amounts, name the diners, then pass one phone around or let diners claim through a QR join link. Water, tax and service charges are split equally by default. One diner collects the money.
+Phone-first bill splitting with one-phone pass-around and QR diner mode. Paste or type a bill, review parsed quantities/amounts, add diners and assign dishes. Water, tax and service charges split equally by default. An outside collector is separate from diners and does not change their shares.
 
-## Run
+## Run and deploy for testing
 
     npm ci
     npm run dev
+    npm run typecheck
     npm run build
-    npx tsc --noEmit
+    npm run preview
 
-Deploy the Vite build output in `dist` as a static site. No backend setup is required, but QR collaboration depends on the public ntfy.sh relay and internet access. Join links contain the table encryption key; share only with the diners.
+Deploy the Vite output in `dist` as a static HTTPS site. QR collaboration uses the public ntfy.sh relay. Join links contain the table encryption key; share only with diners. Keep the host online while claiming.
 
-## v5 safety candidate, not production ready
+## Payment workflow
 
-- QR diner payment links and payment-copy buttons are intentionally DISABLED. An editable host table cannot guarantee that a diner has the latest collector or amount. QR diners must confirm the final amount and collector's UPI ID directly with the host and enter them in their payment app.
-- One-phone UPI links remain available with a valid collector ID; check the payee and amount in the payment app. Opening a payment app does not mark a payment received. The collector ticks received manually.
-- Any settlement change clears received ticks, including an amount changing back to its old value. Old saved boolean ticks are not accepted.
-- Export is blocked until dishes are claimed, or the host explicitly selects equal split in one-phone mode. A mismatch with the printed total also blocks final export.
-- The collector must be one of the diners. An external collector is not supported.
-- OCR and actual iPhone payment-app behavior are not verified. Pasting iPhone Live Text into the bill box is an alternative to built-in image scanning. Always check parsed quantities, amounts, discounts and printed total.
-- The relay is best-effort, with no uptime promise. Keep the host page open and online while diners claim.
-- Not verified on a real iPhone, offline, or at 320px. A fast-tap lost-claim report has not been reproduced.
-- No payments are processed or verified by CHIT.
+1. Host checks the printed total, every dish, each person's share and collector name/UPI ID.
+2. Host explicitly reviews and freezes the table. Bill, people, claims and collector become immutable for that table.
+3. Each diner checks the signed, frozen collector and their own amount. Payment links appear only after review and a durable browser pin. Conflicting finalized details block payment for that table/seat, including after reload.
+4. Check payee and amount again in the UPI app. Opening an app is not payment confirmation. The collector marks received manually.
 
-## Verification
+Corrections require a new table. Old UPI links already opened in another app cannot be revoked. Tell diners about corrections before asking anyone to pay again. Web Locks and persistent browser storage are required; unsupported or failed storage blocks finalization/payment instead of guessing.
 
-This candidate builds with Vite and passes strict TypeScript checking. Focused source regression checks cover explicit equal split, unclaimed zero-price items, printed-total mismatch, parser variants and failed relay sends. Independent browser regression is pending for this version. These checks do not establish production readiness.
+## Status: tested preview, not production ready
+
+- Automatic photo OCR is NOT implemented. Photo upload and manually pasting iPhone Live Text are available; CHIT does not extract text from photos itself.
+- Actual iPhone UPI app launch, bank/payee resolution, iOS share sheets and real payments are untested. CHIT never verifies a bank payment.
+- Local Chrome tests cover two diners, allocation, external collector, explicit finalization, reload, review gating, wrong/conflicting pin data, storage failures and concurrent tables. Independent source/browser checks were bounded, not every possible workflow.
+- One bounded synthetic test against the real ntfy.sh relay passed: two diners claimed, shares matched, host finalized, correct per-diner review links appeared, and host reload retained identity/settlement. This is not an uptime, latency or outage guarantee.
+- Latest payment candidate's complete screens at 320px and all device/browser combinations are not verified. Earlier one-phone layout checks passed at320/420px; do not generalize that to every screen.
+- Offline use is not supported. The public relay is best-effort. Reload recovery requires the same browser storage.
+- Parser ambiguities show CHECK warnings; always compare the edited bill with the original, including discounts and printed total.
+- PDF uses built-in Latin fonts. Unsupported names are explicitly blocked, not silently replaced. Real iPhone PDF sharing is untested.
+
+No real money was moved during testing. Use synthetic bills for controlled testing before relying on it at a restaurant.
