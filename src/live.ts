@@ -163,7 +163,7 @@ export class HostEngine {
                     const others = Object.values(cur).reduce((a, b) => a + b, 0);
                     const q = Math.max(0, Math.min(Number.isInteger(want[it.id]) ? want[it.id] : 0, it.qty));
                     if (wantShare.includes(it.id)) {
-                        if (others > 0) rej[it.id] = 'Someone already took units of this. Ask them, or the host can reassign.';
+                        if (others > 0) rej[it.id] = 'This dish was picked by units earlier. Ask the host to switch it to equal split.';
                         else sh = [...sh, pid];
                     } else if (q > 0) {
                         if (sh.length > 0) rej[it.id] = 'This one is being shared. Tap Share to join.';
