@@ -61,7 +61,11 @@ export function parseBill(text: string): Parsed {
     const charges: Charge[] = [];
     let printedTotal: number | null = null;
     const skipped: string[] = [];
-    for (const raw of text.split(/\r?\n/)) {
+    if(/\b(EUR|USD|GBP|AUD|CAD|SGD|AED)\b|[€£$]/i.test(text)||/\b\d+,\d{2}(?:\s*[A-Z]{1,2})?\s*$/m.test(text)){return {items,charges,printedTotal,skipped:['CHECK: This looks like a non-INR or decimal-comma bill. Automatic import is blocked. Enter INR amounts manually.']};}
+    const lines=text.split(/\r?\n/);const header=lines.findIndex(l=>/\b(qty|quantity)\b/i.test(l)&&/\b(rate|amount|total)\b/i.test(l));const headerText=header>=0?lines[header]:'';const rateFirst=/\brate\b.*\b(qty|quantity)\b/i.test(headerText);const qtyFirst=/\b(qty|quantity)\b.*\brate\b/i.test(headerText);
+    for (const [lineIndex,raw] of lines.entries()) {
+        if(header>=0&&lineIndex<=header)continue;
+        if(/\b(cont(?:act)?\s*(?:no|number)|fssai|sac[ /]?(?:hsn|code)|gstin|gst\s*no|t\.no|w\.no|covers|steward|print user|cash|card|visa|mastercard|change|payment|tender|paid|upi|summe)\b/i.test(raw)){skipped.push(raw.trim());continue;}
         let line = raw.replace(/[|₹]/g, ' ').replace(/\b(rs|inr)\.?/gi, ' ').replace(/\d+(\.\d+)?\s*%/g, ' ').replace(/\s+/g, ' ').trim();
         if (!line || !/[a-z]/i.test(line)) continue;
         const m = line.match(/((?:-?\d[\d,]*(?:\.\d{1,2})?\s*)+)$/);
@@ -69,7 +73,7 @@ export function parseBill(text: string): Parsed {
         const nums = m[1].trim().split(/\s+/);
         const amount = toMinor(nums[nums.length - 1]);
         let name = line.slice(0, line.length - m[1].length).trim().replace(/[:\-.]+$/, '').trim();
-        if (amount === null || !/[a-z]/i.test(name)) { skipped.push(raw.trim()); continue; }
+        if (amount === null || Math.abs(amount)>10_000_000 || !/[a-z]/i.test(name)) { skipped.push(raw.trim()); continue; }
         if (TOTAL_RE.test(name) && !CHARGE_RE.test(name)) {
             if (!/sub/i.test(name)) printedTotal = amount;
             continue;
@@ -86,7 +90,12 @@ export function parseBill(text: string): Parsed {
         let qty = nums.length >= 2 && /^\d{1,2}$/.test(nums[0]) && parseInt(nums[0], 10) > 0 ? parseInt(nums[0], 10) : 1; // qty column, e.g. "Naan 6 360.00"
         if (nums.length >= 3) { // rate qty total, e.g. "Naan 60.00 6 360.00"
             const rate = toMinor(nums[nums.length - 3]); const qn = /^\d{1,3}$/.test(nums[nums.length - 2]) ? parseInt(nums[nums.length - 2], 10) : 0;
-            if (rate !== null && qn > 0 && rate * qn === amount) qty = qn;
+            const firstQty=/^\d{1,3}$/.test(nums[nums.length-3])?parseInt(nums[nums.length-3],10):0;const middleRate=toMinor(nums[nums.length-2]);
+            const forward=firstQty>0&&middleRate!==null&&firstQty*middleRate===amount;const reverse=rate!==null&&qn>0&&rate*qn===amount;
+            if(forward&&reverse&&firstQty!==qn&&!qtyFirst&&!rateFirst){qty=firstQty;warn='Ambiguous quantity/rate columns';}
+            else if(reverse&&rateFirst)qty=qn;
+            else if(forward)qty=firstQty;
+            else if(reverse)qty=qn;
             else warn = `${nums.join(' ')}`;
         }
         // trailing "2 x", "3 @", or "x" left in the name by the number split
