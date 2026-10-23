@@ -116,7 +116,7 @@ export class Reassembler {
 }
 
 // ---- host authority ----
-export type Snap = { items: Item[]; charges: Charge[]; people: Person[]; claims: Claims; shares: Shares; chargeMode: ChargeMode; spread: boolean; upi?: string; hostName?: string };
+export type Snap = { items: Item[]; charges: Charge[]; people: Person[]; claims: Claims; shares: Shares; chargeMode: ChargeMode; spread: boolean; upi?: string; hostName?: string; printedTotal?: number | null };
 const cleanName = (s: unknown) => String(s ?? '').replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, 24);
 
 export class HostEngine {
@@ -183,9 +183,9 @@ export class HostEngine {
         const tot: Record<string, number> = {}; res.people.forEach((p) => (tot[p.id] = p.total));
         const ids = new Set(s.people.map((p) => p.id));
         return {
-            rev: ++this.rev, open: this.open, final: res.reconciles && res.unassigned === 0 && Object.keys(res.unclaimedUnits).length === 0 && s.people.length > 0, at: Date.now(),
+            rev: ++this.rev, open: this.open, final: (s.printedTotal == null || s.printedTotal === res.billTotal) && res.reconciles && res.unassigned === 0 && Object.keys(res.unclaimedUnits).length === 0 && s.people.length > 0, at: Date.now(),
             items: s.items.map((it) => ({ i: it.id, n: it.name.slice(0, 40), q: it.qty, t: it.total, ...(it.everyone ? { e: 1 as const } : {}), c: s.claims[it.id] ?? {}, s: s.shares[it.id] ?? [] })),
-            ...(validUpi(s.upi) ? { pay: { n: (s.hostName ?? '').trim().slice(0, 30) || 'the host', u: (s.upi ?? '').trim() } } : {}),
+            // Live payment links disabled until immutable settlement confirmation is supported.
             people: s.people.map((p) => ({ i: p.id, n: p.name })), tot,
             ack: Object.fromEntries(Object.entries(this.ack).filter(([k]) => ids.has(k))), rej: Object.fromEntries(Object.entries(this.rej).filter(([k]) => ids.has(k))),
         };
