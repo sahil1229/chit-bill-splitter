@@ -503,3 +503,10 @@ html, body, #root { background: #FBF7ED; }
 .ch-left li { display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px dotted #b9ae96; padding: 4px 0; }
 .ch-gpay { font-size: 18px !important; min-height: 56px !important; }
 .ch-switch { flex: 1 1 100%; min-height: 32px !important; font-size: 13px !important; padding: 0 !important; }
+/* Header: one full-width column so the mark is truly centred (an older flex rule left space-between behind). */
+.sb-title { grid-template-columns: minmax(0, 1fr) !important; justify-content: stretch !important; }
+.ch-mark { justify-self: stretch; }
+/* Letter-spacing adds a trailing gap after the last character; balance it on the left. */
+.ch-stars { padding-left: .5em; }
+.ch-tag { padding-left: .12em; }
+.sb-title .sb-link { margin-right: 14px; }
