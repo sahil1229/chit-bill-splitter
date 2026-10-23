@@ -11,6 +11,9 @@ import { parsePayLink, payLink, type PayRequest } from './upi';
 import { recoverHostIdentity, DinerApp, HostPanel, envLink, useHost } from './LiveUI';
 import { Charge, ChargeMode, Claims, Shares, Item, Person, computeSplit, countedByDefault, fmt, parseBill, toMinor, uid } from './engine';
 
+/** Accepts a function of the latest state: picks from diners can land between a render and a tap. */
+type SetState = (p: Partial<State> | ((cur: State) => Partial<State>)) => void;
+
 type State = {
     step: 0 | 1 | 2 | 3;
     items: Item[];
@@ -80,7 +83,7 @@ function MoneyInput({ value, onCommit, label }: { value: number; onCommit: (n: n
 }
 
 /* ---------- Step 1: bill ---------- */
-function BillStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
+function BillStep({ s, set }: { s: State; set: SetState }) {
     const [paste, setPaste] = useState('');
     const [photo, setPhoto] = useState<string | null>(null);
     const [note, setNote] = useState('');
@@ -173,7 +176,7 @@ function BillStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
 }
 
 /* ---------- Step 2: people ---------- */
-function PeopleStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
+function PeopleStep({ s, set }: { s: State; set: SetState }) {
     const [name, setName] = useState('');
     const [count, setCount] = useState(Math.max(s.people.length, 2));
     useEffect(() => { if (s.people.length > count) setCount(s.people.length); }, [s.people.length]);
@@ -223,7 +226,7 @@ function PeopleStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) 
 }
 
 /* ---------- Step 3: claim ---------- */
-function ClaimStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
+function ClaimStep({ s, set }: { s: State; set: SetState }) {
     const person = s.people.find((p) => p.id === s.current) ?? s.people[0];
     const res = useMemo(() => computeSplit(s), [s]);
     const [shareOpen, setShareOpen] = useState<string | null>(null); const [convert, setConvert] = useState<string | null>(null);
@@ -242,9 +245,15 @@ function ClaimStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
             <div className="sb-dots" aria-label="Progress">{s.people.map((p) => <span key={p.id} className={p.id === person.id ? 'is-now' : s.touched[p.id] ? 'is-done' : ''} style={{ background: hue(p.id, s.people) }}>{p.name.slice(0, 1).toUpperCase()}</span>)}</div>
         </section>;
     }
-    const setClaim = (itemId: string, n: number) => set({ claims: { ...s.claims, [itemId]: { ...(s.claims[itemId] ?? {}), [person.id]: n } }, touched: { ...s.touched, [person.id]: true } });
+    const setClaim = (itemId: string, n: number) => set((cur) => {
+        // Clamp against the latest claims: a diner may have taken units since this screen rendered.
+        const it = cur.items.find((i) => i.id === itemId); const others = Object.entries(cur.claims[itemId] ?? {}).reduce((a, [k, v]) => a + (k === person.id ? 0 : v), 0);
+        const v = Math.max(0, Math.min(n, (it?.qty ?? 0) - others));
+        return { claims: { ...cur.claims, [itemId]: { ...(cur.claims[itemId] ?? {}), [person.id]: v } }, touched: { ...cur.touched, [person.id]: true } };
+    });
     const finish = () => s.mode==='live' ? set({step:1,touched:{...s.touched,[person.id]:true}}) : next ? set({ current: next.id, gate: true, touched: { ...s.touched, [person.id]: true } }) : set({ step: 3, touched: { ...s.touched, [person.id]: true } });
     return <div style={{ ['--who' as string]: color }} className="sb-claimscreen">
+        {s.mode === 'live' && s.people.length > 1 && <div className="sb-people" role="group" aria-label="Whose picks to fix">{s.people.map((p) => <button key={p.id} type="button" aria-current={p.id === person.id} onClick={() => set({ current: p.id })}><Avatar p={p} people={s.people} />{p.name}</button>)}</div>}
         <div className="sb-whobar"><Avatar p={person} people={s.people} /><strong>{person.name}</strong><span className="ch-note">{person.name}’s turn. Claim your paneer, not your friend’s fries.</span></div>
         <ul className="sb-tiles">
             {s.items.map((it) => {
@@ -260,15 +269,14 @@ function ClaimStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
                 // Several plates: naans and drinks are counted (2, 1 and 3 of 6); gravies are shared by whoever had some.
                 const units = it.qty > 1 && !isShared && !it.everyone && (claimers.length > 0 || (pref[it.id] ?? (countedByDefault(it.name) ? 'count' : 'share')) === 'count');
                 const canSwitch = it.qty > 1 && !it.everyone && claimers.every((p) => p.id === person.id) && sharedBy.every((p) => p.id === person.id);
-                const switchTo = (m: 'share' | 'count') => { setPref({ ...pref, [it.id]: m }); const claims = { ...s.claims }; delete claims[it.id]; set({ claims, shares: { ...s.shares, [it.id]: [] } }); };
+                const switchTo = (m: 'share' | 'count') => { setPref({ ...pref, [it.id]: m }); set((cur) => { const claims = { ...cur.claims }; delete claims[it.id]; return { claims, shares: { ...cur.shares, [it.id]: [] } }; }); };
                 const mineOn = isShared ? mineShared : n > 0;
-                const toggleShare = (pid: string) => {
-                    const cur = s.shares[it.id] ?? [];
-                    const base = cur;
+                const toggleShare = (pid: string) => set((cur) => {
+                    const base = cur.shares[it.id] ?? [];
                     const nextList = base.includes(pid) ? base.filter((x) => x !== pid) : [...base, pid];
-                    const claims = { ...s.claims }; delete claims[it.id];
-                    set({ shares: { ...s.shares, [it.id]: nextList }, claims, touched: { ...s.touched, [person.id]: true } });
-                };
+                    const claims = { ...cur.claims }; delete claims[it.id];
+                    return { shares: { ...cur.shares, [it.id]: nextList }, claims, touched: { ...cur.touched, [person.id]: true } };
+                });
                 const legacy = !isShared && claimers.length > 0;
                 const tap = () => { if (it.everyone) return; if (units) { setClaim(it.id, n > 0 ? 0 : Math.min(1, room)); return; } if (legacy) { setConvert(it.id); return; } toggleShare(person.id); };
                 const blocked = false;
@@ -293,7 +301,7 @@ function ClaimStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
                     <span className="sb-small">{claimers.map((p) => `${p.name} ${s.claims[it.id][p.id]} of ${it.qty} (about ${fmt(Math.round(it.total * s.claims[it.id][p.id] / it.qty))})`).join(', ')}. Switching splits the whole ₹{(it.total / 100).toFixed(2)} equally between {claimers.map((p) => p.name).join(', ')}, which changes what each person owes. Nothing changes unless you confirm.</span>
                     <div className="sb-row-btns">
                         <button type="button" className="sb-btn sb-ghost" onClick={() => setConvert(null)}>Keep units</button>
-                        <button type="button" className="sb-btn" onClick={() => { const claims = { ...s.claims }; delete claims[it.id]; set({ shares: { ...s.shares, [it.id]: claimers.map((p) => p.id) }, claims, touched: { ...s.touched, [person.id]: true } }); setConvert(null); }}>Switch to equal split</button>
+                        <button type="button" className="sb-btn" onClick={() => { set((cur) => { const ids = Object.entries(cur.claims[it.id] ?? {}).filter(([, v]) => v > 0).map(([k]) => k); const claims = { ...cur.claims }; delete claims[it.id]; return { shares: { ...cur.shares, [it.id]: ids }, claims, touched: { ...cur.touched, [person.id]: true } }; }); setConvert(null); }}>Switch to equal split</button>
                     </div>
                 </li>}
                 {shareOpen === it.id && <li className="sb-sharepanel">
@@ -303,7 +311,7 @@ function ClaimStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
                         {s.people.map((p) => <button key={p.id} type="button" aria-pressed={sharedBy.some((x) => x.id === p.id)} className="sb-pill" style={{ ['--c' as string]: hue(p.id, s.people) }} onClick={() => toggleShare(p.id)}>{p.name}</button>)}
                     </div>
                     <div className="sb-row-btns">
-                        {isShared && <button type="button" className="sb-btn sb-ghost" onClick={() => { set({ shares: { ...s.shares, [it.id]: [] } }); }}>Not shared</button>}
+                        {isShared && <button type="button" className="sb-btn sb-ghost" onClick={() => { set((cur) => ({ shares: { ...cur.shares, [it.id]: [] } })); }}>Not shared</button>}
                         <button type="button" className="sb-btn" onClick={() => setShareOpen(null)}>Done</button>
                     </div>
                 </li>}
@@ -318,7 +326,7 @@ function ClaimStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
 }
 
 /* ---------- Step 4: split ---------- */
-function SplitStep({ s, set, finalize, goPick }: { s: State; set: (p: Partial<State>) => void; finalize: () => Promise<void>; goPick: () => void }) {
+function SplitStep({ s, set, finalize, goPick }: { s: State; set: SetState; finalize: () => Promise<void>; goPick: () => void }) {
     const res = useMemo(() => computeSplit(s), [s]);
     const [open, setOpen] = useState<string | null>(null);
     const [msg, setMsg] = useState('');
@@ -470,7 +478,7 @@ function Host({ onJoin }: { onJoin: (l: NonNullable<ReturnType<typeof envLink>>)
     const SETTLE = ['items', 'charges', 'people', 'claims', 'shares', 'chargeMode', 'spread', 'collectorId', 'upi', 'printedTotal', 'hostName', 'externalCollector', 'collectorMode'] as const;
     const hasDurableFinal=(tableId?:string)=>{try{return !!tableId&&!!localStorage.getItem('chit.final.'+tableId);}catch{setJournalError('Saved table storage is unavailable. Reload after enabling browser storage; do not pay from this screen.');return true;}};
     const setNow = (p: Partial<State>) => { const cur: any = sRef.current; const changed = SETTLE.some((k) => k in p && JSON.stringify((p as any)[k]) !== JSON.stringify(cur[k])); if (changed && (finalizing.current || cur.settlement || journal.current?.locked || hasDurableFinal(cur.tableId))) { setEditNotice('This table is frozen. Start a new bill for corrections.'); return; } const collectorPatch = p.externalCollector !== undefined ? { collectorId: '' } : {}; const next = { ...sRef.current, ...(changed && !('received' in p) ? { received: {} } : {}), ...p, ...collectorPatch }; sRef.current = next; setSaved(next); };
-    const set = (p: Partial<State>) => { if (meta.ready) setNow({ ...(p.step === 2 && p.gate === undefined ? { gate: true, current: s.people[0]?.id ?? s.current } : {}), ...p }); };
+    const set: SetState = (arg) => { const p = typeof arg === 'function' ? arg(sRef.current) : arg; if (meta.ready) setNow({ ...(p.step === 2 && p.gate === undefined ? { gate: true, current: s.people[0]?.id ?? s.current } : {}), ...p }); };
     const mode = s.mode ?? (s.items.length ? 'one' : 'pick');
     const version = JSON.stringify([s.items.map((i) => i.id + '|' + i.name + '|' + i.qty + '|' + i.total + '|' + (i.everyone ? 1 : 0)), s.people, s.claims, s.shares, s.charges, s.chargeMode, s.upi ?? '', s.hostName ?? '', s.printedTotal, s.externalCollector, s.settlement?.id, s.approved ?? []]);
     const host = useHost(() => ({ ...sRef.current, frozen: finalizing.current }), (p) => { if (meta.ready) setNow(p as Partial<State>); }, version, meta.ready && journalReady, { get: () => sRef.current.hostSess, set: (v) => { if (meta.ready) setNow({ hostSess: v }); } });
@@ -505,7 +513,7 @@ function Host({ onJoin }: { onJoin: (l: NonNullable<ReturnType<typeof envLink>>)
             {(!meta.ready || (!journalReady && !journalError)) ? <p className="sb-muted">Loading…</p> : journalError ? (meta.loadError ? null : <p className="sb-warn">This table is blocked. Reload to reconcile, or start a new bill. Old payment instructions cannot be revoked.</p>) : mode === 'pick' ? <section className="lv-card"><h2>New bill. Table for how many phones?</h2><button className="ch-door" type="button" onClick={() => setNow({ mode: 'one' })}><b>One phone</b><span>pass it around the table, everyone taps their dishes</span></button><p className="ch-or">or</p><button className="ch-door" type="button" onClick={() => setNow({ mode: 'live' })}><b>Everyone’s phones</b><span>scan to join, pick your own, host sees who owns what</span></button><p className="sb-muted sb-small">Have a join link someone sent you? Paste it:</p><input className="lv-in" aria-label="Join link" placeholder="Paste join link" value={code} onChange={(e) => { setCode(e.target.value); const l = parseLink(e.target.value); if (l) onJoin(l); }} /></section> : <>
                 {s.step === 0 && <BillStep s={s} set={set} />}
                 {s.step === 1 && mode !== 'live' && <PeopleStep s={s} set={set} />}
-                {s.step === 1 && mode === 'live' && <HostPanel s={s} host={host} setPay={(p) => set(p)} goPay={() => set({ step: 3 })} goClaim={(personId) => set({ step: 2, gate: false, current: personId??s.people[0]?.id??'' })} removePerson={(id) => set({ people: s.people.filter((p) => p.id !== id), claims: Object.fromEntries(Object.entries(s.claims).map(([k, v]) => [k, Object.fromEntries(Object.entries(v).filter(([q]) => q !== id))])), shares: Object.fromEntries(Object.entries(s.shares).map(([k, v]) => [k, v.filter((q) => q !== id)])) })} />}
+                {s.step === 1 && mode === 'live' && <HostPanel s={s} host={host} setPay={(p) => set(p)} goPay={() => set({ step: 3 })} goClaim={(personId) => set({ step: 2, gate: false, current: personId??s.people[0]?.id??'' })} removePerson={(id) => set((cur) => ({ people: cur.people.filter((p) => p.id !== id), claims: Object.fromEntries(Object.entries(cur.claims).map(([k, v]) => [k, Object.fromEntries(Object.entries(v).filter(([q]) => q !== id))])), shares: Object.fromEntries(Object.entries(cur.shares).map(([k, v]) => [k, v.filter((q) => q !== id)])) }))} />}
                 {s.step === 2 && <ClaimStep s={s} set={set} />}
                 {s.step === 3 && !meta.message && <SplitStep s={s} set={set} finalize={finalize} goPick={() => set(mode === 'live' ? { step: 1 } : { step: 2, current: s.people[0]?.id ?? '', gate: true })} />}
                 {s.step < 2 && !(mode === 'live' && s.step === 1) && <div className="sb-bar sb-bar-solo"><button className="sb-btn sb-block" type="button" disabled={!canNext} onClick={() => set({ step: (s.step + 1) as State['step'] })}>{label}</button></div>}

@@ -43,13 +43,16 @@ export function useHost(read: () => HostSnap, write: (p: Partial<Snap>) => void,
     const eng = useRef<HostEngine | null>(null); const keys = useRef<CryptoKey | null>(null);
     const generation = useRef(0);
     const unsub = useRef<(() => void) | null>(null); const chain = useRef(Promise.resolve()); const timer = useRef<any>(null); const lastSent = useRef(0);
+    // A change after a quiet spell goes out almost at once; a burst of picks shares one message every 2s.
+    const lastFire = useRef(0);
     const broadcast = () => {
         clearTimeout(timer.current);
         timer.current = setTimeout(async () => {
             if (!eng.current || !keys.current) return;
+            lastFire.current = Date.now();
             const engine = eng.current; const g = generation.current; const link = engine.link;
             try { const ok = await hostSend(link, keys.current, engine.state()); if (ok) lastSent.current = Date.now(); if (g !== generation.current || eng.current !== engine) return; setSess((s) => (s ? { ...s, ...(ok ? { sent: Date.now() } : {}), failed: !ok } : s)); } catch { if (g === generation.current && eng.current === engine) setSess((s) => (s ? { ...s, failed: true } : s)); }
-        }, 2000); // one relay message for a burst of picks
+        }, Math.max(150, 2000 - (Date.now() - lastFire.current)));
     };
     const persist = async () => { const g = generation.current; const engine = eng.current, key = keys.current; if (engine && key) { const priv = await crypto.subtle.exportKey('jwk', key); if (g !== generation.current || eng.current !== engine) return; hs.set({ link: engine.link, priv, eng: eng.current.dump(), snap: (() => { const x = read(); return { items: x.items, charges: x.charges, people: x.people, claims: x.claims, shares: x.shares, chargeMode: x.chargeMode, spread: x.spread, printedTotal: x.printedTotal, tableId: x.tableId, settlement: x.settlement, externalCollector: x.externalCollector }; })() }); } };
     const run = (link: Link, signKey: CryptoKey, saved?: any) => {
@@ -173,10 +176,16 @@ export function HostPanel({ s, host, goClaim, goPay, removePerson, setPay }: { s
 export function DinerApp({ link }: { link: Link }) {
     const d = useRef<Diner | null>(null); const re = useRef(new Reassembler());
     const [seatId, setSeatId] = useState('');
-    const [name, setName] = useState(''); const [joined, setJoined] = useState(false); const [st, setSt] = useState<LiveState | null>(null);
+    const [name, setName] = useState(''); const [joined, setJoined] = useState(false);
+    // A saved seat means this phone already joined: show loading, not the join form, while it is restored.
+    const [restoring, setRestoring] = useState(() => !!store.get('sb.seat.' + link.topic)?.pid); const [st, setSt] = useState<LiveState | null>(null);
     const [relay, setRelay] = useState('connecting'); const [now, setNow] = useState(Date.now()); const [lastSeen, setLastSeen] = useState(0); const [joinAt, setJoinAt] = useState(0);
-    const [want, setWant] = useState<Record<string, number>>({}); const [sh, setSh] = useState<string[]>([]); const [myN, setMyN] = useState(0); const [sendFail, setSendFail] = useState(false);
-    const dirty = useRef(false); const sendT = useRef<any>(null);
+    const [sendFail, setSendFail] = useState(false); const sendT = useRef<any>(null);
+    // My changes the host has not confirmed yet, per dish. n = the message they last went out in (0 = not sent).
+    type Op = { c?: number; s?: boolean; n: number; at: number; tries?: number };
+    const pendingRef = useRef<Record<string, Op>>({}); const [pending, setPendingState] = useState<Record<string, Op>>({});
+    const setPending = (p: Record<string, Op>) => { pendingRef.current = p; setPendingState(p); };
+    const [lateChange, setLateChange] = useState(false);
     const [payment, setPayment] = useState<DinerPayment | null>(null); const [paymentError, setPaymentError] = useState(''); const [paymentReviewed, setPaymentReviewed] = useState('');
     useEffect(() => { let cancelled = false; setPayment(null); setPaymentReviewed('');
         if (!st?.settlement || !seatId || !joined) return;
@@ -190,35 +199,52 @@ export function DinerApp({ link }: { link: Link }) {
         try { const saved = e.newValue ? JSON.parse(e.newValue) : null; if (saved?.status === 'conflict' || !saved) { setPayment(null); setPaymentReviewed(''); setPaymentError('This table has a saved payment conflict. Do not pay; ask the host for a new table.'); } } catch { setPayment(null); setPaymentReviewed(''); setPaymentError('Saved payment details could not be read. Do not pay.'); }
     }; window.addEventListener('storage', onStorage); return () => window.removeEventListener('storage', onStorage); }, [link.topic, seatId]);
     useEffect(() => { const t = setInterval(() => setNow(Date.now()), 3000); return () => clearInterval(t); }, []);
-    useEffect(() => subscribe(link.topic, async (b) => {
+    // On (re)load the relay replays every earlier update; hold them back and show only the newest.
+    const [loaded, setLoaded] = useState(false); const caughtUp = useRef(false); const newest = useRef<LiveState | null>(null);
+    useEffect(() => { caughtUp.current = false; return subscribe(link.topic, async (b) => {
         const m = await openHost(link, b); if (!m) return;
         const x = re.current.add(m); if (!x) return;
-        setSt(x); setLastSeen(Date.now());
-    }, setRelay), [link.topic]);
+        if (caughtUp.current) { setSt(x); setLastSeen(Date.now()); } else newest.current = x;
+    }, setRelay, () => { caughtUp.current = true; if (newest.current) { setSt(newest.current); setLastSeen(Date.now()); } setLoaded(true); }); }, [link.topic]);
     const pid = seatId;
     const me = st?.people.find((p) => p.i === pid);
-    // adopt host truth: once the host acknowledged my latest snapshot, show what it actually granted
-    useEffect(() => {
-        if (!st || !me || dirty.current) return;
-        if ((st.ack[pid] ?? 0) >= myN) {
-            const c: Record<string, number> = {}; const s2: string[] = [];
-            st.items.forEach((i) => { if (i.c[pid]) c[i.i] = i.c[pid]; if (i.s.includes(pid)) s2.push(i.i); });
-            setWant(c); setSh(s2);
-        }
-    }, [st?.rev]);
-    const push = (c: Record<string, number>, s2: string[]) => {
-        setWant(c); setSh(s2); dirty.current = true; clearTimeout(sendT.current);
-        sendT.current = setTimeout(async () => { const n = (d.current!.n += 1); setMyN(n); d.current!.save(name); dirty.current = false; const ok = await (await d.current!.claimsRaw(c, s2, n)); setSendFail(!ok); }, 1500);
+    const listed = useRef(false); if (me) listed.current = true; // seen on the host's list at least once
+    const send = async () => {
+        clearTimeout(sendT.current); const dn = d.current; const ops = pendingRef.current;
+        if (!dn || !Object.keys(ops).length) return;
+        const n = (dn.n += 1); const at = Date.now(); lastSend.current = at;
+        setPending(Object.fromEntries(Object.entries(ops).map(([k, v]) => [k, { ...v, n, at, tries: (v.n > 0 ? (v.tries ?? 0) + 1 : 0) }])));
+        void dn.save(name);
+        const ok = await dn.sendOps(Object.fromEntries(Object.entries(ops).map(([k, { c, s: share }]) => [k, { ...(c !== undefined ? { c } : {}), ...(share !== undefined ? { s: share } : {}) }])), n);
+        setSendFail(!ok);
     };
+    // One tap = one per-dish change; bursts of taps go out together after 1.5s.
+    const lastSend = useRef(0);
+    const change = (id: string, op: { c?: number; s?: boolean }) => { setPending({ ...pendingRef.current, [id]: { ...op, n: 0, at: Date.now() } }); clearTimeout(sendT.current); sendT.current = setTimeout(() => void send(), Math.max(250, 1500 - (Date.now() - lastSend.current))); };
+    // The host confirmed message n: those changes are now part of its state (granted, or rejected with a reason).
+    useEffect(() => {
+        if (!st || !pid) return;
+        const ack = st.ack[pid] ?? 0; const left = Object.fromEntries(Object.entries(pendingRef.current).filter(([, v]) => v.n === 0 || v.n > ack));
+        if (Object.keys(left).length !== Object.keys(pendingRef.current).length) setPending(left);
+        if (st.settlement && Object.keys(left).length) setLateChange(true);
+    }, [st?.rev, pid]);
+    // Unconfirmed changes are resent until the host confirms them; leaving the page sends them right away.
+    const stRef = useRef(st); stRef.current = st;
+    // Backs off (8s, 16s, 32s, then every minute) and stops once the table is frozen or closed, to spare the relay's limit.
+    useEffect(() => { const t = setInterval(() => { const cur = stRef.current; if (!cur || cur.settlement || !cur.open) return; if (Object.values(pendingRef.current).some((v) => v.n > 0 && Date.now() - v.at > Math.min(8000 * 2 ** (v.tries ?? 0), 60000))) void send(); }, 4000); return () => clearInterval(t); }, [seatId]);
+    useEffect(() => { const flush = () => { if (document.visibilityState === 'hidden' || !document.visibilityState) void send(); }; document.addEventListener('visibilitychange', flush); window.addEventListener('pagehide', flush); return () => { document.removeEventListener('visibilitychange', flush); window.removeEventListener('pagehide', flush); }; }, [seatId]);
     const [joining, setJoining] = useState(false); const busy = useRelayBusy(); const [pref, setPref] = useState<Record<string, 'share' | 'count'>>({});
     // A retry after a slow or rate-limited join reuses the same seat, so the host never sees a duplicate.
     const join = async () => { if (joining) return; setJoining(true); setSendFail(false); try { const nm = name.trim() || 'Guest'; if (!d.current) { d.current = await new Diner(link).init(); setSeatId(d.current.pid); } await d.current.save(nm); const ok = await d.current.join(nm); setJoined(ok); setJoinAt(Date.now()); if (!ok) setSendFail(true); } finally { setJoining(false); } };
-    useEffect(() => { (async () => { const x = new Diner(link); const nm = await x.restore(); if (nm) { d.current = x; setSeatId(x.pid); setName(nm); setMyN(x.n); await x.join(nm); setJoined(true); setJoinAt(Date.now()); } })(); }, []);
+    useEffect(() => { (async () => { const x = new Diner(link); const nm = await x.restore(); if (nm) { d.current = x; setSeatId(x.pid); setName(nm); setJoined(true); setJoinAt(Date.now()); setRestoring(false); await x.join(nm); } else setRestoring(false); })(); }, []);
     if (st && !st.open) return <section className="lv-card"><h2>The table is closed</h2><p>The host closed this session. Your last picks are with the host.</p></section>;
+    if (restoring) return <section className="lv-card"><h2>Loading the table…</h2></section>;
     if (!joined) return <section className="lv-card"><h2>Join the table</h2><p>Add your name, then tick what you had.</p><input className="lv-in" aria-label="Your name" placeholder="Your name" maxLength={24} value={name} onChange={(e) => setName(e.target.value)} /><button className="sb-btn sb-block" type="button" disabled={!name.trim() || joining} onClick={join}>{joining ? 'Joining…' : 'Join'}</button>{joining && busy && <BusyNote />}{sendFail && <p className="lv-warn">Could not reach the relay. Check your connection and try again.</p>}</section>;
     const stale = lastSeen > 0 && now - lastSeen > HOST_LOST;
-    if (!me) return <section className="lv-card"><h2>{st ? 'You are not on the list' : 'Waiting for the host…'}</h2>{st ? <p>This seat is not on the host list. The table may already be finalized, or the host may have removed the seat. Reloading will not add you. Ask the host for a new table if you need to join.</p> : now - joinAt > 25000 ? <p className="lv-warn">The host has not answered. Check the host phone is open and online, then reload this link.</p> : <p className="sb-muted">Connecting ({relay}).</p>}</section>;
-    const acked = (st!.ack[pid] ?? 0) >= myN && !dirty.current;
+    // Just joined: earlier updates do not list me yet, so that is "adding you", not "not on the list".
+    const joining2 = !!st && !listed.current && now - joinAt < 30000;
+    if (!me) return <section className="lv-card"><h2>{joining2 ? 'Adding you to the table…' : st ? 'You are not on the list' : loaded ? 'Waiting for the host…' : 'Loading the table…'}</h2>{joining2 ? <p className="sb-muted">The host’s phone adds you in a moment.</p> : st ? <p>This seat is not on the host list. The table may already be finalized, or the host may have removed the seat. Reloading will not add you. Ask the host for a new table if you need to join.</p> : now - joinAt > 25000 ? <p className="lv-warn">The host has not answered. Check the host phone is open and online, then reload this link.</p> : <p className="sb-muted">Connecting ({relay}).</p>}</section>;
+    const acked = Object.keys(pending).length === 0;
     if (st!.settlement) {
         const currentPayment = payment?.settlementId === st!.settlement.id && payment?.digest === st!.settlement.digest;
         return <section className="lv-card ch-next" data-next="pay">
@@ -230,6 +256,7 @@ export function DinerApp({ link }: { link: Link }) {
                 <div className="lv-total"><span>Your share</span><b>{fmt(payment.amount)}</b></div>
                 <p className="sb-small">To UPI ID <b>{payment.upi}</b></p>
                 <PayOptions req={{ pa: payment.upi, pn: payment.name, am: payment.amount, tn: 'CHIT ' + payment.settlementId.slice(0, 8) }} autoOpen={`${payment.settlementId}-${seatId}`} /></>}
+            {lateChange && <p className="lv-warn" role="alert">The host froze the bill before your last change reached them, so it is not included. If your amount looks wrong, tell the host before paying.</p>}
             <p className="sb-small sb-muted">The host froze this bill, so amounts cannot change. Settlement {st!.settlement.id.slice(0, 8)}.</p>
         </section>;
     }
@@ -238,10 +265,14 @@ export function DinerApp({ link }: { link: Link }) {
         <h2>Hi {me.n}</h2>
         {stale && <p className="lv-warn" role="alert">Lost the host. Your picks are not saved until it is back. Keep this page open.</p>}
         {busy && <BusyNote />}
-        {sendFail && <p className="lv-warn" role="alert">Your last pick did not reach the relay. Change anything to retry.</p>}
+        {sendFail && <p className="lv-warn" role="alert">Your last pick has not reached the host yet. Retrying automatically.</p>}
         {unclaimed.length > 0 && <div className="lv-warn"><b>Nobody has had yet:</b> {unclaimed.map((i) => i.n).join(', ')}</div>}
         <ul className="lv-list">{st!.items.map((i) => {
-            const mine = want[i.i] ?? 0; const shared = sh.includes(i.i); const rej = st!.rej[pid]?.[i.i];
+            // What the host has, with my unconfirmed change on top.
+            const op = pending[i.i]; let mine = i.c[pid] ?? 0; let shared = i.s.includes(pid);
+            if (op?.s !== undefined) { shared = op.s; if (op.s) mine = 0; }
+            if (op?.c !== undefined) { mine = op.c; if (op.c > 0) shared = false; }
+            const rej = op ? undefined : st!.rej[pid]?.[i.i];
             if (i.e) return <li key={i.i}><b>{i.n}</b><span>{fmt(i.t)} split by everyone</span></li>;
             const eaters = new Set<string>([...i.s, ...Object.keys(i.c).filter((k) => (i.c[k] ?? 0) > 0)]);
             const others = Object.entries(i.c).reduce((a, [k, v]) => a + (k === pid ? 0 : v), 0);
@@ -249,10 +280,10 @@ export function DinerApp({ link }: { link: Link }) {
             // One plate is shared. Several plates: gravies are shared by everyone who had some; naans and drinks are counted.
             const mode: 'share' | 'count' = i.q <= 1 || i.s.length > 0 ? 'share' : others > 0 || mine > 0 ? 'count' : (pref[i.i] ?? (countedByDefault(i.n) ? 'count' : 'share'));
             const canSwitch = i.q > 1 && others === 0 && othersShared === 0;
-            const switchTo = (m: 'share' | 'count') => { setPref({ ...pref, [i.i]: m }); if (mine > 0 || shared) push({ ...want, [i.i]: 0 }, sh.filter((x) => x !== i.i)); };
+            const switchTo = (m: 'share' | 'count') => { setPref({ ...pref, [i.i]: m }); if (mine > 0 || shared) change(i.i, { c: 0, s: false }); };
             if (mode === 'count') {
                 const max = Math.max(0, i.q - others);
-                const set = (v: number) => push({ ...want, [i.i]: Math.max(0, Math.min(v, max)) }, sh.filter((x) => x !== i.i));
+                const set = (v: number) => change(i.i, { c: Math.max(0, Math.min(v, max)) });
                 return <li key={i.i} className="lv-item"><b>{i.n}</b><span style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{fmt(i.t)} · {i.q} × {fmt(Math.round(i.t / i.q))}<br />{others ? `${others} taken by others · ` : ''}{i.q - others - mine} left</span>
                     <span className="lv-step" role="group" aria-label={`How many ${i.n} you had`}><button type="button" aria-label={`Fewer ${i.n}`} disabled={mine <= 0} onClick={() => set(mine - 1)}>−</button><output aria-live="polite">{mine}</output><button type="button" aria-label={`More ${i.n}`} disabled={mine >= max} onClick={() => set(mine + 1)}>+</button></span>
                     {mine > 0 && <small className="sb-small">You: {mine} of {i.q} · {fmt(Math.round(i.t * mine / i.q))}</small>}
@@ -261,10 +292,10 @@ export function DinerApp({ link }: { link: Link }) {
             }
             const on = shared; const count = eaters.size + (on && !eaters.has(pid) ? 1 : 0) - (!on && eaters.has(pid) ? 1 : 0);
             return <li key={i.i} className="lv-item"><b>{i.n}</b><span style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{fmt(i.t)}{i.q > 1 ? ` · ${i.q} plates, shared` : ''}<br />{count === 0 ? 'nobody yet' : count === 1 ? 'one person' : `${count} sharing · ${fmt(Math.round(i.t / count))} each`}</span>
-                <button type="button" className={`lv-share ${on ? 'on' : ''}`} aria-pressed={on} onClick={() => push({ ...want, [i.i]: 0 }, on ? sh.filter((x) => x !== i.i) : [...sh, i.i])}>{on ? 'I had this ✓' : 'I had this'}</button>
+                <button type="button" className={`lv-share ${on ? 'on' : ''}`} aria-pressed={on} onClick={() => change(i.i, { s: !on })}>{on ? 'I had this ✓' : 'I had this'}</button>
                 {canSwitch && <button type="button" className="sb-link ch-switch" onClick={() => switchTo('count')}>Count how many I had instead</button>}
                 {rej && <em className="lv-rej">{rej}</em>}</li>; })}</ul>
-        <div className="lv-total"><span>Your amount so far</span><b>{fmt(st!.tot[pid] ?? 0)}</b><small>{acked ? 'Saved with the host' : 'Sending…'} · changes if others pick more</small></div>
+        <div className={`lv-total${acked ? '' : ' is-updating'}`} aria-busy={!acked}><span>Your amount so far</span><b>{fmt(st!.tot[pid] ?? 0)}</b><small>{acked ? 'Saved with the host' : 'Sending…'} · changes if others pick more</small></div>
         <div className="lv-paybox" role="status"><p className="sb-small"><b>That’s it for now.</b> When everyone has picked, the host freezes the bill and your payment opens right here, ready for Google Pay. Keep this page open.</p></div>
     </section>;
 }

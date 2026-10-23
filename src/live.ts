@@ -90,16 +90,21 @@ export async function publish(topic: string, body: string, tries = 8): Promise<b
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** Streaming subscribe with reconnect, replay of the 12h cache, delayed re-poll (the cache is eventually consistent) and dedupe by relay id. */
-export function subscribe(topic: string, onMsg: (body: string) => void, onStatus: (s: 'connecting' | 'live' | 'reconnecting') => void) {
+/**
+ * Streaming subscribe with reconnect and dedupe by relay id. The relay's backlog (up to 12h of earlier
+ * messages) is fetched and handled first, then onReady fires, so a reloaded page can show only the
+ * latest state instead of replaying every old one on screen.
+ */
+export function subscribe(topic: string, onMsg: (body: string) => void | Promise<void>, onStatus: (s: 'connecting' | 'live' | 'reconnecting') => void, onReady?: () => void) {
     let stop = false; const seen = new Set<string>(); let ctl: AbortController | null = null; let last = ''; let polled = false;
-    const deliver = (line: string) => {
+    const deliver = (line: string): void | Promise<void> => {
         if (!line.trim()) return;
-        try { const e = JSON.parse(line); if (e.event === 'message' && e.id && !seen.has(e.id)) { seen.add(e.id); last = e.id; if (typeof e.message === 'string' && !e.attachment) onMsg(e.message); } } catch { /* ignore */ }
+        try { const e = JSON.parse(line); if (e.event === 'message' && e.id && !seen.has(e.id)) { seen.add(e.id); last = e.id; if (typeof e.message === 'string' && !e.attachment) return onMsg(e.message); } } catch { /* ignore */ }
     };
-    const poll = async () => { try { const r = await fetch(`${RELAY}/${topic}/json?poll=1&since=all`); (await r.text()).split('\n').forEach(deliver); } catch { /* ignore */ } };
+    const poll = async () => { try { const r = await fetch(`${RELAY}/${topic}/json?poll=1&since=all`); await Promise.all((await r.text()).split('\n').map(deliver)); } catch { /* ignore */ } };
     (async () => {
         let delay = 1500; onStatus('connecting');
+        await poll(); if (stop) return; onReady?.();
         while (!stop) {
             ctl = new AbortController();
             try {
@@ -187,6 +192,8 @@ export class HostEngine {
             if (!Number.isInteger(d.n) || d.n <= r.lastN) return false;       // replay / out-of-order
             if (!snap.people.some((p) => p.id === pid)) return false;        // removed by host
             r.lastN = d.n;
+            if (d.ops && typeof d.ops === 'object' && !Array.isArray(d.ops)) { this.applyOps(pid, d.ops, d.n); return true; }
+            // Older pages send their whole plate; kept so a table survives a deploy mid-dinner.
             const want: Record<string, number> = d.c && typeof d.c === 'object' ? d.c : {};
             const wantShare: string[] = Array.isArray(d.sh) ? d.sh : [];
             const claims: Claims = {}; const shares: Shares = {}; const rej: Record<string, string> = {};
@@ -212,6 +219,43 @@ export class HostEngine {
             return true;
         }
         return false;
+    }
+    /**
+     * A diner's changes, only for the dishes they touched: { dish: { c: count } | { s: sharing } }.
+     * Values are absolute ("set my naans to 2"), so a resend is harmless, and dishes not mentioned,
+     * including anything the host fixed on the host phone, are left alone. Messages are handled one at a
+     * time in arrival order, so when two people race for the last naan, whoever reaches the host first gets it.
+     */
+    private applyOps(pid: string, ops: Record<string, unknown>, n: number) {
+        const snap = this.read();
+        const claims: Claims = { ...snap.claims }; const shares: Shares = { ...snap.shares }; const rej: Record<string, string> = {};
+        for (const [id, raw] of Object.entries(ops).slice(0, 200)) {
+            const it = snap.items.find((i) => i.id === id); const op = raw as { c?: unknown; s?: unknown };
+            if (!it || it.everyone || !op || typeof op !== 'object') continue;
+            const cur = { ...(claims[id] ?? {}) }; let mine = cur[pid] ?? 0; delete cur[pid];
+            const others = Object.values(cur).reduce((a, b) => a + b, 0);
+            const sharers = (shares[id] ?? []).filter((x) => x !== pid);
+            let iShare = (shares[id] ?? []).includes(pid);
+            if (typeof op.s === 'boolean') {
+                if (!op.s) iShare = false;
+                else if (others > 0) rej[id] = 'Others counted this dish, so it cannot be shared. Ask the host to switch it.';
+                else { iShare = true; mine = 0; }
+            }
+            if (Number.isInteger(op.c)) {
+                const want = Math.max(0, Math.min(op.c as number, it.qty));
+                if (want > 0 && sharers.length > 0) rej[id] = 'Others are sharing this dish. Tap "I had this" to join them.';
+                else {
+                    const got = Math.min(want, it.qty - others); mine = got; if (want > 0) iShare = false;
+                    if (got < want) rej[id] = got > 0 ? `Someone got there first: only ${got} left, so you have ${got}.` : 'Someone got there first: none left.';
+                }
+            }
+            if (mine > 0) cur[pid] = mine;
+            if (Object.keys(cur).length) claims[id] = cur; else delete claims[id];
+            const next = iShare ? [...sharers, pid] : sharers;
+            if (next.length) shares[id] = next; else delete shares[id];
+        }
+        this.ack[pid] = n; this.rej[pid] = rej;
+        this.write({ claims, shares });
     }
     state(): LiveState {
         const s = this.read();
@@ -250,6 +294,8 @@ export class Diner {
     }
     async save(name: string) { store.set('sb.seat.' + this.link.topic, { pid: this.pid, n: this.n, name, pub: this.kp.pub, priv: await crypto.subtle.exportKey('jwk', (this.kp as any).priv ?? this.kp.sign).catch(() => null) }); }
     async join(name: string) { return publish(this.link.topic, await seal(this.link, { t: 'join', pid: this.pid, name, pub: this.kp.pub }, this.kp.sign)); }
+    /** Only the dishes changed since the host last confirmed; see HostEngine.applyOps. */
+    async sendOps(ops: Record<string, { c?: number; s?: boolean }>, n: number) { return publish(this.link.topic, await seal(this.link, { t: 'claims', pid: this.pid, n, ops }, this.kp.sign)); }
     async claimsRaw(c: Record<string, number>, sh: string[], n: number) { return publish(this.link.topic, await seal(this.link, { t: 'claims', pid: this.pid, n, c, sh }, this.kp.sign)); }
     async claims(c: Record<string, number>, sh: string[]) { this.n += 1; return { n: this.n, ok: publish(this.link.topic, await seal(this.link, { t: 'claims', pid: this.pid, n: this.n, c, sh }, this.kp.sign)) }; }
 }

@@ -156,7 +156,7 @@ export function computeSplit(p: { items: Item[]; charges: Charge[]; people: Pers
         parts.slice(0, n).forEach((amt, i) => {
             if (!weights[i]) return;
             people[i].items += amt;
-            const note = it.everyone ? 'split by everyone' : sh.length ? `shared by ${sh.length}` : weights[i] === 1 && it.qty === 1 && weights.filter((w) => w).length > 1 ? 'shared' : `${weights[i]} of ${it.qty}`;
+            const note = it.everyone ? 'split by everyone' : sh.length > 1 ? `shared by ${sh.length}` : sh.length ? 'whole dish' : weights[i] === 1 && it.qty === 1 && weights.filter((w) => w).length > 1 ? 'shared' : `${weights[i]} of ${it.qty}`;
             people[i].lines.push({ itemId: it.id, name: it.name, amount: amt, note });
         });
         unassigned += parts[n];

@@ -89,6 +89,9 @@ test('one phone: bill to frozen split, payment links to the group and to one pay
     const buf = await (await dl.createReadStream()).toArray().then((c) => Buffer.concat(c));
     expect(buf.subarray(0, 8).toString()).toBe('%PDF-1.4');
     expect(buf.toString('latin1')).toContain('Bilal');
+    // Each person's own box lists what they had and how (PDF text escapes brackets)
+    const pdf = buf.toString('latin1');
+    for (const line of ['Garlic Naan  \\(2 of 6\\)', 'Garlic Naan  \\(3 of 6\\)', 'Butter Chicken  \\(whole dish\\)', 'Masala Cola  \\(4 of 4\\)', 'WHO OWES WHAT']) expect(pdf).toContain(line);
 
     // Reload keeps the frozen table, and edits stay blocked
     await host.reload();

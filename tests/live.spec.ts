@@ -216,3 +216,105 @@ test('live: a rate-limited join waits, shows the relay is busy, and keeps one se
     // The simulated 429s are logged by the browser; anything else still fails the test.
     problems.splice(0, problems.length, ...problems.filter((p) => !p.includes('status of 429')));
 });
+
+test('live race: two people mash + on the same naans; the total never passes 6 and the loser is told', async ({ browser }) => {
+    const host = await phone(browser, 'pixel');
+    await hostBill(host, '6 Garlic Naan 360.00\nTotal 360.00');
+    const url = await openTable(host, 'Mom', 'mom@oksbi', false);
+    const a = await phone(browser, 'pixel'); await join(a, url, 'Asha');
+    const b = await phone(browser, 'iphone'); await join(b, url, 'Bilal');
+    // Both see 6 left and both grab 4, at the same time.
+    await Promise.all([a, b].map(async (p) => { for (let k = 0; k < 4; k++) await p.getByRole('button', { name: 'More Garlic Naan' }).click(); }));
+    await saved(a); await saved(b);
+    const got = async (p: Page) => Number(await item(p, 'Garlic Naan').locator('output').innerText());
+    await expect.poll(async () => (await got(a)) + (await got(b))).toBe(6);
+    const [ga, gb] = [await got(a), await got(b)];
+    expect([ga, gb].sort()).toEqual([2, 4]);
+    const loser = ga === 2 ? a : b;
+    await expect(item(loser, 'Garlic Naan')).toContainText('Someone got there first: only 2 left, so you have 2.');
+    await expect(loser.getByRole('button', { name: 'More Garlic Naan' })).toBeDisabled();
+    // Then they fight over it: the winner gives one back, the loser takes it.
+    const winner = loser === a ? b : a;
+    await winner.getByRole('button', { name: 'Fewer Garlic Naan' }).click(); await saved(winner);
+    await expect(loser.getByRole('button', { name: 'More Garlic Naan' })).toBeEnabled();
+    await loser.getByRole('button', { name: 'More Garlic Naan' }).click(); await saved(loser);
+    await expect.poll(async () => [await got(winner), await got(loser)]).toEqual([3, 3]);
+    await expect(next(host)).toContainText('Everything is picked');
+});
+
+test('live race: the host fixes Asha on the host phone while Asha taps another dish; both stick', async ({ browser }) => {
+    const host = await phone(browser, 'pixel');
+    await hostBill(host, '6 Garlic Naan 360.00\nDal Makhani 400.00\nTotal 760.00');
+    const url = await openTable(host, 'Mom', 'mom@oksbi', false);
+    const a = await phone(browser, 'pixel'); await join(a, url, 'Asha');
+    const b = await phone(browser, 'pixel'); await join(b, url, 'Bilal');
+    for (let k = 0; k < 3; k++) await a.getByRole('button', { name: 'More Garlic Naan' }).click();
+    await saved(a);
+    // Host corrects Asha to 1 naan, while Asha taps Dal on her own phone at the same moment.
+    await host.getByText('Who had what').click();
+    await host.getByRole('button', { name: 'Fix picks on my phone' }).click();
+    await host.getByRole('group', { name: 'Whose picks to fix' }).getByRole('button', { name: /Asha/ }).click();
+    await Promise.all([
+        (async () => { await host.getByRole('button', { name: 'Fewer Garlic Naan Asha had' }).click(); await host.getByRole('button', { name: 'Fewer Garlic Naan Asha had' }).click(); })(),
+        pick(a, 'Dal Makhani'),
+    ]);
+    await saved(a);
+    await expect(item(a, 'Garlic Naan').locator('output')).toHaveText('1');
+    await expect(item(a, 'Dal Makhani').getByRole('button', { name: /^I had this/ })).toHaveAttribute('aria-pressed', 'true');
+    await host.getByRole('button', { name: 'Done, invite friends' }).click();
+    await host.getByText('Who had what').click();
+    await expect(host.locator('details .lv-list li', { hasText: 'Garlic Naan' })).toContainText('Asha ×1');
+    await expect(host.locator('details .lv-list li', { hasText: 'Dal Makhani' })).toContainText('Asha');
+});
+
+test('live race: a tap that lands after the host froze is not silently lost', async ({ browser }) => {
+    const host = await phone(browser, 'pixel');
+    await hostBill(host, 'Masala Dosa 180.00\nFilter Coffee 60.00\nTotal 240.00');
+    const url = await openTable(host, 'Mom', 'mom@oksbi', false);
+    const a = await phone(browser, 'pixel'); await join(a, url, 'Asha');
+    await pick(a, 'Masala Dosa'); await pick(a, 'Filter Coffee'); await saved(a);
+    await next(host).getByRole('button', { name: 'Review and freeze →' }).click();
+    await host.getByRole('button', { name: 'Freeze & send payment links' }).click();
+    await item(a, 'Filter Coffee').getByRole('button', { name: /^I had this/ }).click(); // Asha un-ticks coffee...
+    await host.getByRole('button', { name: 'Yes, freeze' }).click();                    // ...as the host freezes
+    await expect(a.getByText('The host froze the bill before your last change reached them')).toBeVisible();
+    await expect(a.locator('a[data-app="gpay"]')).toHaveText('Pay ₹240.00 in Google Pay');
+});
+
+test('smooth: refreshing a diner shows only the current amount, never older ones', async ({ browser }) => {
+    const host = await phone(browser, 'pixel');
+    await hostBill(host);
+    const url = await openTable(host, 'Mom', 'mom@oksbi', false);
+    const a = await phone(browser, 'pixel'); await join(a, url, 'Asha');
+    // Build up a history of different amounts on the relay
+    for (const d of DISHES.slice(0, 6)) { await pick(a, d); await saved(a); }
+    const final = await a.locator('.lv-total b').innerText();
+    // Record every amount and heading the page paints while it reloads
+    await a.addInitScript(() => {
+        (window as any).__seen = [];
+        new MutationObserver(() => { const t = document.querySelector('.lv-total b')?.textContent; const h = document.querySelector('.lv-card h2')?.textContent; const seen = (window as any).__seen; const v = `${h}|${t ?? ''}`; if (seen[seen.length - 1] !== v) seen.push(v); }).observe(document, { subtree: true, childList: true, characterData: true });
+    });
+    await a.reload();
+    await expect(a.locator('.lv-total b')).toHaveText(final);
+    await a.waitForTimeout(1500);
+    const seen: string[] = await a.evaluate(() => (window as any).__seen);
+    const amounts = seen.map((v) => v.split('|')[1]).filter(Boolean);
+    expect(new Set(amounts)).toEqual(new Set([final]));
+    expect(seen.map((v) => v.split('|')[0])).not.toContain('Join the table');
+    expect(seen.map((v) => v.split('|')[0])).not.toContain('You are not on the list');
+});
+
+test('smooth: a single tap is confirmed by the host within about a second', async ({ browser }) => {
+    test.skip(!!process.env.CHIT_URL, 'timing depends on the public relay');
+    const host = await phone(browser, 'pixel');
+    await hostBill(host);
+    const url = await openTable(host, 'Mom', 'mom@oksbi', false);
+    const a = await phone(browser, 'pixel'); await join(a, url, 'Asha');
+    await a.waitForTimeout(2500); // quiet spell
+    const t0 = Date.now();
+    await pick(a, 'Paneer Tikka');
+    await expect(a.locator('.lv-total.is-updating')).toHaveCount(1);
+    await saved(a);
+    expect(Date.now() - t0).toBeLessThan(1500);
+    await expect(a.locator('.lv-total.is-updating')).toHaveCount(0);
+});

@@ -195,3 +195,82 @@ test.describe('share links', () => {
         expect(at('https://chit.example.com/app/')).toBe('https://chit.example.com/app/');
     });
 });
+
+test.describe('two people at once', () => {
+    const bill = () => parseBill('6 Garlic Naan 360.00\n2 Dal Makhani 700.00\nTotal 1060.00');
+    async function table(names: string[]) {
+        const { link } = await newSession(); const { items } = bill();
+        let snap: Snap = { items, charges: [], people: [], claims: {}, shares: {}, chargeMode: 'equal', spread: false };
+        const eng = new HostEngine(link, () => snap, (p) => { snap = { ...snap, ...p }; });
+        const diners: Record<string, { pid: string; key: Awaited<ReturnType<typeof newKeyPair>>; n: number }> = {};
+        for (const [k, name] of names.entries()) {
+            const key = await newKeyPair(); const pid = 'p' + name.toLowerCase().padEnd(7, 'x') + k;
+            await eng.handle(await seal(link, { t: 'join', pid, name, pub: key.pub }, key.sign)); diners[name] = { pid, key, n: 0 };
+        }
+        const naan = items.find((i) => i.name === 'Garlic Naan')!.id, dal = items.find((i) => i.name === 'Dal Makhani')!.id;
+        const send = async (name: string, ops: Record<string, { c?: number; s?: boolean }>, n?: number) => { const d = diners[name]; const m = n ?? ++d.n; return eng.handle(await seal(link, { t: 'claims', pid: d.pid, n: m, ops }, d.key.sign)); };
+        const count = (name: string, id = naan) => snap.claims[id]?.[diners[name].pid] ?? 0;
+        return { eng, send, count, naan, dal, diners, snap: () => snap, set: (p: Partial<Snap>) => { snap = { ...snap, ...p }; } };
+    }
+
+    test('race for the last naans: whoever reaches the host first gets them; the other is told', async () => {
+        const t = await table(['Asha', 'Bilal']);
+        await t.send('Asha', { [t.naan]: { c: 4 } });
+        await t.send('Bilal', { [t.naan]: { c: 4 } });
+        expect([t.count('Asha'), t.count('Bilal')]).toEqual([4, 2]);
+        expect(t.eng.rej[t.diners.Bilal.pid][t.naan]).toBe('Someone got there first: only 2 left, so you have 2.');
+        await t.send('Asha', { [t.naan]: { c: 2 } }); // Asha gives two back
+        await t.send('Bilal', { [t.naan]: { c: 4 } });
+        expect([t.count('Asha'), t.count('Bilal')]).toEqual([2, 4]);
+        expect(t.eng.rej[t.diners.Bilal.pid][t.naan]).toBeUndefined();
+    });
+
+    test('a diner changing one dish does not undo what the host fixed on another', async () => {
+        const t = await table(['Asha']);
+        await t.send('Asha', { [t.naan]: { c: 3 } });
+        t.set({ claims: { ...t.snap().claims, [t.naan]: { [t.diners.Asha.pid]: 1 } } }); // host fixes Asha to 1 on the host phone
+        await t.send('Asha', { [t.dal]: { s: true } });
+        expect(t.count('Asha')).toBe(1);
+        expect(t.snap().shares[t.dal]).toEqual([t.diners.Asha.pid]);
+    });
+
+    test('resends are harmless, replays and old messages are ignored', async () => {
+        const t = await table(['Asha']);
+        await t.send('Asha', { [t.naan]: { c: 2 } });
+        await t.send('Asha', { [t.naan]: { c: 2 } }); // resend of the same change
+        expect(t.count('Asha')).toBe(2);
+        expect(await t.send('Asha', { [t.naan]: { c: 6 } }, 1)).toBe(false); // replayed old message number
+        expect(t.count('Asha')).toBe(2);
+    });
+
+    test('shared vs counted at the same moment: first one decides, the other is told', async () => {
+        const t = await table(['Asha', 'Bilal']);
+        await t.send('Asha', { [t.dal]: { s: true } });
+        await t.send('Bilal', { [t.dal]: { c: 1 } });
+        expect(t.count('Bilal', t.dal)).toBe(0);
+        expect(t.eng.rej[t.diners.Bilal.pid][t.dal]).toContain('Others are sharing this dish');
+        await t.send('Bilal', { [t.dal]: { s: true } });
+        expect(t.snap().shares[t.dal]).toEqual([t.diners.Asha.pid, t.diners.Bilal.pid]);
+    });
+
+    test('free-for-all: 5 people, 2000 random taps in random order never break the rules', async () => {
+        const names = ['A', 'B', 'C', 'D', 'E'];
+        const t = await table(names);
+        let seed = 7; const rnd = (n: number) => { seed = (seed * 1103515245 + 12345) % 2 ** 31; return seed % n; };
+        const qty = { [t.naan]: 6, [t.dal]: 2 };
+        for (let k = 0; k < 2000; k++) {
+            const who = names[rnd(5)]; const id = rnd(2) ? t.naan : t.dal;
+            const op = rnd(3) === 0 ? { s: !!rnd(2) } : { c: rnd(8) - 1 };
+            // A third of messages arrive out of order (an older number): the host must drop them.
+            const n = rnd(3) === 0 ? Math.max(1, t.diners[who].n - rnd(3)) : undefined;
+            await t.send(who, { [id]: op }, n);
+            for (const item of [t.naan, t.dal]) {
+                const counts = Object.values(t.snap().claims[item] ?? {}); const sharers = t.snap().shares[item] ?? [];
+                expect(counts.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(qty[item]);
+                expect(counts.every((c) => Number.isInteger(c) && c >= 0)).toBe(true);
+                expect(sharers.length > 0 && counts.some((c) => c > 0)).toBe(false); // never shared and counted at once
+                expect(new Set(sharers).size).toBe(sharers.length);
+            }
+        }
+    });
+});

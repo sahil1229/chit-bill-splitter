@@ -510,3 +510,6 @@ html, body, #root { background: #FBF7ED; }
 .ch-stars { padding-left: .5em; }
 .ch-tag { padding-left: .12em; }
 .sb-title .sb-link { margin-right: 14px; }
+/* While a pick is on its way, the total quietly shows it is about to change. */
+.lv-total b { transition: opacity .2s; }
+.lv-total.is-updating b { opacity: .45; }
