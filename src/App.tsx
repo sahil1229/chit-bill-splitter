@@ -32,6 +32,7 @@ type State = {
     mode?: 'pick' | 'one' | 'live';
     hostSess?: unknown;
     hostName?: string;
+    approved?: string[];
 };
 const EMPTY: State = { step: 0, items: [], charges: [], printedTotal: null, people: [], claims: {}, shares: {}, chargeMode: 'equal', spread: false, collectorId: '', upi: '', received: {}, current: '', touched: {}, gate: true };
 
@@ -239,7 +240,7 @@ function ClaimStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
         </section>;
     }
     const setClaim = (itemId: string, n: number) => set({ claims: { ...s.claims, [itemId]: { ...(s.claims[itemId] ?? {}), [person.id]: n } }, touched: { ...s.touched, [person.id]: true } });
-    const finish = () => next ? set({ current: next.id, gate: true, touched: { ...s.touched, [person.id]: true } }) : set({ step: 3, touched: { ...s.touched, [person.id]: true } });
+    const finish = () => s.mode==='live' ? set({step:1,touched:{...s.touched,[person.id]:true}}) : next ? set({ current: next.id, gate: true, touched: { ...s.touched, [person.id]: true } }) : set({ step: 3, touched: { ...s.touched, [person.id]: true } });
     return <div style={{ ['--who' as string]: color }} className="sb-claimscreen">
         <div className="sb-whobar"><Avatar p={person} people={s.people} /><strong>{person.name}</strong><span className="ch-note">{person.name}’s turn. Claim your paneer, not your friend’s fries.</span></div>
         <ul className="sb-tiles">
@@ -299,7 +300,7 @@ function ClaimStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
         </ul>
         <div className="sb-bar sb-ticker">
             <div><span className="sb-small">{person.name}, so far</span><strong>{fmt(mine.items)}</strong></div>
-            <button className="sb-btn" type="button" onClick={finish}>{next ? `Done, pass on` : 'Done, see split'}</button>
+            <button className="sb-btn" type="button" onClick={finish}>{s.mode==='live' ? 'Done, invite friends' : next ? `Done, pass on` : 'Done, see split'}</button>
         </div>
     </div>;
 }
@@ -317,6 +318,8 @@ function SplitStep({ s, set, finalize }: { s: State; set: (p: Partial<State>) =>
     useEffect(() => { const bad = Object.keys(s.received).filter((id) => s.received[id] && (id === s.collectorId || s.received[id] !== rk(res.people.find((p) => p.id === id)?.total ?? -1))); if (bad.length) set({ received: Object.fromEntries(Object.entries(s.received).filter(([id]) => !bad.includes(id))) }); }, [s.received, s.collectorId, s.upi, res]);
     const back = payers.filter((p) => s.received[p.id] === rk(p.total)).reduce((a, b) => a + b.total, 0);
     const pct = owed ? Math.round((back / owed) * 100) : 0;
+    const liveGate = s.mode === 'live'; const approvedFor = (id: string) => !liveGate || (s.approved ?? []).includes(id);
+    const payInfoOk = !liveGate || res.people.filter((q) => q.id !== s.collectorId && q.total > 0).every((q) => (s.approved ?? []).includes(q.id));
     const upiLink = (amt: number) => `upi://pay?pa=${encodeURIComponent(s.upi.trim())}&pn=${encodeURIComponent(collector?.name ?? '')}&am=${(amt / 100).toFixed(2)}&cu=INR&tn=${encodeURIComponent('Dinner split')}`;
     const share = async (text: string, okMsg: string) => {
         try {
@@ -324,8 +327,8 @@ function SplitStep({ s, set, finalize }: { s: State; set: (p: Partial<State>) =>
             else { await navigator.clipboard.writeText(text); setMsg('Copied. Paste it into your group chat.'); }
         } catch { setMsg('Sharing was cancelled. Nothing was sent.'); }
     };
-    const request = (p: { name: string; total: number }) => share(`Hi ${p.name}, your share of dinner is ${fmt(p.total)}.${s.upi.trim() ? ` Pay ${collector?.name} on UPI: ${s.upi.trim()}` : ` Please pay ${collector?.name ?? 'me'}.`}`, `Request for ${p.name} opened in the share sheet. That is a request, not a payment.`);
-    const rep: ReportInput = { externalCollector: s.externalCollector, printedTotal: s.printedTotal, res, items: s.items, charges: s.charges, people: s.people, collectorId: s.collectorId, upi: s.upi, received: Object.fromEntries(payers.filter((p) => s.received[p.id] === rk(p.total)).map((p) => [p.id, true])), chargeMode: s.chargeMode, spread: s.spread, date: new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) };
+    const request = (p: { id?: string; name: string; total: number }) => share(`Hi ${p.name}, your share of dinner is ${fmt(p.total)}.${s.upi.trim() && (!liveGate || (p.id !== undefined && approvedFor(p.id))) ? ` Pay ${collector?.name} on UPI: ${s.upi.trim()}` : ` Please pay ${collector?.name ?? 'me'}.`}`, `Request for ${p.name} opened in the share sheet. That is a request, not a payment.`);
+    const rep: ReportInput = { externalCollector: s.externalCollector, printedTotal: s.printedTotal, res, items: s.items, charges: s.charges, people: s.people, collectorId: s.collectorId, upi: payInfoOk ? s.upi : '', received: Object.fromEntries(payers.filter((p) => s.received[p.id] === rk(p.total)).map((p) => [p.id, true])), chargeMode: s.chargeMode, spread: s.spread, date: new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) };
     const fin = isFinal(rep);
     const waText = fin.ok ? whatsappText(rep) : '';
     const bad = pdfUnsupported(rep);
@@ -342,7 +345,7 @@ function SplitStep({ s, set, finalize }: { s: State; set: (p: Partial<State>) =>
         setTimeout(() => URL.revokeObjectURL(url), 30000);
         setMsg('Download requested, not confirmed. This page cannot tell if your browser saved the file. If nothing appeared, use Share message instead.');
     };
-    const summary = () => `🧾 Dinner split, total ${fmt(res.billTotal)}\n${payers.map((p) => `${p.name}: ${fmt(p.total)}`).join('\n')}\nPay ${collector?.name ?? 'the collector'}${s.upi.trim() ? ` on UPI: ${s.upi.trim()}` : ''}.`;
+    const summary = () => `🧾 Dinner split, total ${fmt(res.billTotal)}\n${payers.map((p) => `${p.name}: ${fmt(p.total)}`).join('\n')}\nPay ${collector?.name ?? 'the collector'}${s.upi.trim() && payInfoOk ? ` on UPI: ${s.upi.trim()}` : ''}.`;
     const [review, setReview] = useState(false);
     return <>
         {s.settlement ? <section className="sb-card"><h2>Finalized payment details</h2><p>This table cannot be edited. Settlement {s.settlement.id.slice(0, 8)}: {s.settlement.collector.name}, {s.settlement.collector.upi}. Corrections need a new bill. Old payment links cannot be revoked.</p></section> : <section className="sb-card"><h2>Finalize this table</h2><p>Review every share above and the collector below. Finalizing permanently freezes people, claims, bill and collector for this table. Opening a UPI app never confirms payment.</p><p><b>{collector?.name || 'Choose collector'}</b>: {s.upi || 'Add UPI ID'}<br />Bill: {fmt(res.billTotal)}</p>{review ? <><p className="sb-warn">No edits after this. If you need a correction, start a new bill and tell everyone the old payment instructions cannot be revoked.</p><button type="button" className="sb-btn" disabled={!fin.ok || !validUpi(s.upi)} onClick={() => { void finalize().catch((e) => setMsg(String(e.message ?? e))); }}>Confirm and freeze table</button><button type="button" className="sb-link" onClick={() => setReview(false)}>Keep editing</button></> : <button type="button" className="sb-btn" disabled={!fin.ok || !validUpi(s.upi)} onClick={() => setReview(true)}>Review final details</button>}</section>}
@@ -387,7 +390,7 @@ function SplitStep({ s, set, finalize }: { s: State; set: (p: Partial<State>) =>
                         <div className="sb-bl sb-sum"><span>Total</span><span>{fmt(p.total)}</span></div>
                     </div>}
                     {!isCollector && <div className="sb-pay">
-                        {!fin.ok ? <p className="sb-small sb-muted">Amount not final yet.</p> : p.total <= 0 ? <p className="sb-small sb-muted">Nothing to pay.</p> : done ? <p className="sb-small sb-muted">Received. Nothing more to pay.</p> : validUpi(s.upi) && s.settlement ? <span className="ch-pay"><a className="sb-btn sb-small-btn sb-a" href={upiLink(p.total).replace('upi://', 'gpay://upi/')}>Open Google Pay · {fmt(p.total)}</a><a className="sb-link" href={upiLink(p.total)}>Other UPI app</a><button type="button" className="sb-link" onClick={async () => { try { await navigator.clipboard.writeText(`${s.upi.trim()} ${(p.total / 100).toFixed(2)}`); setMsg('Copied UPI ID and amount. Paste them into any UPI app.'); } catch { setMsg(`UPI ID ${s.upi.trim()}, amount ${(p.total / 100).toFixed(2)}`); } }}>Copy ID + amount</button></span> : !s.settlement ? <p className="sb-small sb-muted">Finalize the table before showing payment instructions.</p> : <button type="button" className="sb-btn sb-small-btn" onClick={() => request(p)}>Request {fmt(p.total)}</button>}
+                        {!fin.ok ? <p className="sb-small sb-muted">Amount not final yet.</p> : p.total <= 0 ? <p className="sb-small sb-muted">Nothing to pay.</p> : done ? <p className="sb-small sb-muted">Received. Nothing more to pay.</p> : validUpi(s.upi) && s.settlement && !approvedFor(p.id) ? <p className="sb-small sb-muted">Not approved yet. Approve {p.name} in the Table step to release payment.</p> : validUpi(s.upi) && s.settlement ? <span className="ch-pay"><a className="sb-btn sb-small-btn sb-a" href={upiLink(p.total).replace('upi://', 'gpay://upi/')}>Open Google Pay · {fmt(p.total)}</a><a className="sb-link" href={upiLink(p.total)}>Other UPI app</a><button type="button" className="sb-link" onClick={async () => { try { await navigator.clipboard.writeText(`${s.upi.trim()} ${(p.total / 100).toFixed(2)}`); setMsg('Copied UPI ID and amount. Paste them into any UPI app.'); } catch { setMsg(`UPI ID ${s.upi.trim()}, amount ${(p.total / 100).toFixed(2)}`); } }}>Copy ID + amount</button></span> : !s.settlement ? <p className="sb-small sb-muted">Finalize the table before showing payment instructions.</p> : <button type="button" className="sb-btn sb-small-btn" onClick={() => request(p)}>Request {fmt(p.total)}</button>}
                         {p.total > 0 && <button type="button" role="switch" disabled={!s.settlement} aria-checked={done} className={`sb-got${done ? ' on' : ''}`} onClick={() => set({ received: { ...s.received, [p.id]: done ? 0 : rk(p.total) } })}>{done ? '✓ Received' : 'Mark received'}</button>}
                     </div>}
                 </li>;
@@ -444,7 +447,7 @@ function Host({ onJoin }: { onJoin: (l: NonNullable<ReturnType<typeof envLink>>)
     const setNow = (p: Partial<State>) => { const cur: any = sRef.current; const changed = SETTLE.some((k) => k in p && JSON.stringify((p as any)[k]) !== JSON.stringify(cur[k])); if (changed && (finalizing.current || cur.settlement || journal.current?.locked || hasDurableFinal(cur.tableId))) { setEditNotice('This table is frozen. Start a new bill for corrections.'); return; } const collectorPatch = p.externalCollector !== undefined ? { collectorId: '' } : {}; const next = { ...sRef.current, ...(changed && !('received' in p) ? { received: {} } : {}), ...p, ...collectorPatch }; sRef.current = next; setSaved(next); };
     const set = (p: Partial<State>) => { if (meta.ready) setNow({ ...(p.step === 2 && p.gate === undefined ? { gate: true, current: s.people[0]?.id ?? s.current } : {}), ...p }); };
     const mode = s.mode ?? (s.items.length ? 'one' : 'pick');
-    const version = JSON.stringify([s.items.map((i) => i.id + '|' + i.name + '|' + i.qty + '|' + i.total + '|' + (i.everyone ? 1 : 0)), s.people, s.claims, s.shares, s.charges, s.chargeMode, s.upi ?? '', s.hostName ?? '', s.printedTotal, s.externalCollector, s.settlement?.id]);
+    const version = JSON.stringify([s.items.map((i) => i.id + '|' + i.name + '|' + i.qty + '|' + i.total + '|' + (i.everyone ? 1 : 0)), s.people, s.claims, s.shares, s.charges, s.chargeMode, s.upi ?? '', s.hostName ?? '', s.printedTotal, s.externalCollector, s.settlement?.id, s.approved ?? []]);
     const host = useHost(() => ({ ...sRef.current, frozen: finalizing.current }), (p) => { if (meta.ready) setNow(p as Partial<State>); }, version, meta.ready && journalReady, { get: () => sRef.current.hostSess, set: (v) => { if (meta.ready) setNow({ hostSess: v }); } });
     const [code, setCode] = useState('');
     const top = useRef<HTMLDivElement>(null);
@@ -477,7 +480,7 @@ function Host({ onJoin }: { onJoin: (l: NonNullable<ReturnType<typeof envLink>>)
             {(!meta.ready || (!journalReady && !journalError)) ? <p className="sb-muted">Loading…</p> : journalError ? (meta.loadError ? null : <p className="sb-warn">This table is blocked. Reload to reconcile, or start a new bill. Old payment instructions cannot be revoked.</p>) : mode === 'pick' ? <section className="lv-card"><h2>New bill. Table for how many phones?</h2><button className="ch-door" type="button" onClick={() => setNow({ mode: 'one' })}><b>One phone</b><span>pass it around the table, everyone taps their dishes</span></button><p className="ch-or">or</p><button className="ch-door" type="button" onClick={() => setNow({ mode: 'live' })}><b>Everyone’s phones</b><span>scan to join, pick your own, host sees who owns what</span></button><p className="sb-muted sb-small">Have a join link someone sent you? Paste it:</p><input className="lv-in" aria-label="Join link" placeholder="Paste join link" value={code} onChange={(e) => { setCode(e.target.value); const l = parseLink(e.target.value); if (l) onJoin(l); }} /></section> : <>
                 {s.step === 0 && <BillStep s={s} set={set} />}
                 {s.step === 1 && mode !== 'live' && <PeopleStep s={s} set={set} />}
-                {s.step === 1 && mode === 'live' && <HostPanel s={s} host={host} setPay={(p) => set(p)} goClaim={() => set({ step: 2, gate: false, current: s.people[0]?.id ?? '' })} removePerson={(id) => set({ people: s.people.filter((p) => p.id !== id), claims: Object.fromEntries(Object.entries(s.claims).map(([k, v]) => [k, Object.fromEntries(Object.entries(v).filter(([q]) => q !== id))])), shares: Object.fromEntries(Object.entries(s.shares).map(([k, v]) => [k, v.filter((q) => q !== id)])) })} />}
+                {s.step === 1 && mode === 'live' && <HostPanel s={s} host={host} setPay={(p) => set(p)} goClaim={(personId) => set({ step: 2, gate: false, current: personId??s.people[0]?.id??'' })} removePerson={(id) => set({ people: s.people.filter((p) => p.id !== id), claims: Object.fromEntries(Object.entries(s.claims).map(([k, v]) => [k, Object.fromEntries(Object.entries(v).filter(([q]) => q !== id))])), shares: Object.fromEntries(Object.entries(s.shares).map(([k, v]) => [k, v.filter((q) => q !== id)])) })} />}
                 {s.step === 2 && <ClaimStep s={s} set={set} />}
                 {s.step === 3 && !meta.message && <SplitStep s={s} set={set} finalize={finalize} />}
                 {s.step < 2 && !(mode === 'live' && s.step === 1) && <div className="sb-bar sb-bar-solo"><button className="sb-btn sb-block" type="button" disabled={!canNext} onClick={() => set({ step: (s.step + 1) as State['step'] })}>{label}</button></div>}
@@ -485,4 +488,4 @@ function Host({ onJoin }: { onJoin: (l: NonNullable<ReturnType<typeof envLink>>)
             {meta.message && <p className="sb-warn" role="alert">{meta.message}</p>}
         </div>
     </FileCard>;
-}
+                                                                                                                                                                                  }
