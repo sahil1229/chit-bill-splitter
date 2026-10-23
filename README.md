@@ -23,12 +23,13 @@ Corrections require a new table. Old UPI links already opened in another app can
 
 ## Status: tested preview, not production ready
 
-- Automatic photo OCR is NOT implemented. Photo upload and manually pasting iPhone Live Text are available; CHIT does not extract text from photos itself.
+- Photo OCR preview: Read photo uses a same-origin Tesseract7 worker and English model. Photo pixels stay in browser. JPEG/PNG/WebP under 15 MB and 24 MP only, scaled to 2200px; HEIC unsupported. Text must be checked before explicit parsing. Timeout 60s, cancellation supported. Synthetic desktop test passed, not real receipt/iPhone quality proof. Build copies worker/model assets to dist/ocr (~54MB); do not omit those files when deploying. iPhone Live Text remains an alternative.
 - Actual iPhone UPI app launch, bank/payee resolution, iOS share sheets and real payments are untested. CHIT never verifies a bank payment.
 - Local Chrome tests cover two diners, allocation, external collector, explicit finalization, reload, review gating, wrong/conflicting pin data, storage failures and concurrent tables. Independent source/browser checks were bounded, not every possible workflow.
 - One bounded synthetic test against the real ntfy.sh relay passed: two diners claimed, shares matched, host finalized, correct per-diner review links appeared, and host reload retained identity/settlement. This is not an uptime, latency or outage guarantee.
-- Latest payment candidate's complete screens at 320px and all device/browser combinations are not verified. Earlier one-phone layout checks passed at320/420px; do not generalize that to every screen.
-- Offline use is not supported. The public relay is best-effort. Reload recovery requires the same browser storage.
+- Representative photo review, finalized external/diner collector and blocked-relay screens were checked at 320px. Not all screens, devices or browsers have been checked.
+- Blocked relay requests show a reconnecting warning; offline use is not supported. The public relay is best-effort. Reload recovery requires the same browser storage.
+- OCR/text can misread prices and item layout. Existing-item replacement asks before clearing claims/shares. Scanning asks before replacing nonempty text. Try sample is an explicit text replacement and may replace text with no items without another prompt.
 - Parser ambiguities show CHECK warnings; always compare the edited bill with the original, including discounts and printed total.
 - PDF uses built-in Latin fonts. Unsupported names are explicitly blocked, not silently replaced. Real iPhone PDF sharing is untested.
 
