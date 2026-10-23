@@ -3,8 +3,9 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { computeSplit, fmt, type Item, type Person } from './engine';
 import { store, Diner, HostEngine, Reassembler, hostSend, newSession, openHost, linkFragment, parseLink, subscribe, verify, type Link, type LiveState, type Snap, validUpi } from './live';
 import { PayOptions, Qr } from './Pay';
+import { shareBase } from './site';
 
-export const JOIN_BASE = location.origin + location.pathname;
+export const JOIN_BASE = shareBase();
 /** ntfy.sh allows 250 messages per IP per 12h, so a quiet table only re-announces itself this often. */
 const HEARTBEAT = 75000;
 const HOST_LOST = HEARTBEAT * 2 + 30000;

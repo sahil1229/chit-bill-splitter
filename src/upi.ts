@@ -1,5 +1,6 @@
 /** UPI payment requests: one source for every pay button, QR code and shared pay link. */
 import { b64u, unb64u, validUpi } from './live';
+import { shareBase } from './site';
 
 export type PayRequest = { pa: string; pn: string; am: number; tn: string };
 export type Platform = 'ios' | 'android' | 'other';
@@ -48,7 +49,7 @@ export function appLinks(r: PayRequest, p: Platform): { primary: AppLink | null;
 }
 
 /** Shareable link that opens CHIT's pay screen on the payer's own phone. */
-export const payLink = (r: PayRequest, base = location.origin + location.pathname) =>
+export const payLink = (r: PayRequest, base = shareBase()) =>
     `${base}#pay=${b64u(new TextEncoder().encode(JSON.stringify({ v: 1, pa: r.pa.trim(), pn: r.pn.trim(), am: r.am, tn: cleanNote(r.tn) })))}`;
 export function parsePayLink(hash: string): PayRequest | null {
     const m = hash.match(/pay=([A-Za-z0-9_-]{10,800})/); if (!m) return null;

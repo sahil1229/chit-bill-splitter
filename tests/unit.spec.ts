@@ -177,3 +177,15 @@ test.describe('upi', () => {
         expect(parsePayLink('#join=abc')).toBeNull();
     });
 });
+
+test.describe('share links', () => {
+    test('links made on a locked Vercel address point at the public site', async () => {
+        const { shareBase, PUBLIC_URL } = await import('../src/site');
+        const at = (href: string) => { const u = new URL(href); return shareBase({ hostname: u.hostname, origin: u.origin, pathname: u.pathname }); };
+        expect(at('https://chit-bill-splitter-git-33028d-sahilshah3142-gmailcoms-projects.vercel.app/')).toBe(PUBLIC_URL);
+        expect(at('https://chit-bill-splitter-abc123-sahilshah3142-gmailcoms-projects.vercel.app/')).toBe(PUBLIC_URL);
+        expect(at('https://chit-bill-splitter.vercel.app/')).toBe('https://chit-bill-splitter.vercel.app/');
+        expect(at('http://localhost:4175/')).toBe('http://localhost:4175/');
+        expect(at('https://chit.example.com/app/')).toBe('https://chit.example.com/app/');
+    });
+});
