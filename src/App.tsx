@@ -428,19 +428,20 @@ function Host({ onJoin }: { onJoin: (l: NonNullable<ReturnType<typeof envLink>>)
     const [journalReady, setJournalReady] = useState(false);
     const [journalError, setJournalError] = useState('');
     const [editNotice, setEditNotice] = useState('');
-    useEffect(() => { if (!meta.ready) return; let stop = false;
+    useEffect(() => { if (!meta.ready) return;if(meta.loadError){setJournalError(meta.loadError);return;} let stop = false;
         const init = async () => { const tableId = sRef.current.tableId || crypto.randomUUID();
-            journal.current = new SettlementJournal(tableId, localStorage);
-            try { const settled = await journal.current.recover(); if (stop) return;
+            try { journal.current = new SettlementJournal(tableId, localStorage);
+                const settled = await journal.current.recover(); if (stop) return;
                 if (settled) { const d = journal.current.draft!; if (d.liveLink) { if (settled.hostBinding?.hostPub !== d.liveLink.hostPub || settled.hostBinding?.topic !== d.liveLink.topic) throw Error('Finalized table host binding mismatch.'); sRef.current = { ...sRef.current, mode: 'live', hostSess: await recoverHostIdentity(tableId, { ...(sRef.current.hostSess as any), link: d.liveLink }) }; } const next = { ...sRef.current, ...d, tableId, settlement: settled, collectorId: settled.collector.dinerId ?? '', externalCollector: settled.collector.kind === 'external' ? settled.collector.name : undefined, upi: settled.collector.upi, hostName: settled.collector.name }; sRef.current = next; setSaved(next); }
                 else if (sRef.current.settlement) { throw Error('A finalized table is missing its durable record. Editing and payment are blocked.'); }
                 else { const next = { ...sRef.current, tableId }; sRef.current = next; setSaved(next); }
                 setJournalReady(true);
-            } catch(e) { if (!stop) setJournalError(String((e as Error).message)); }
+            } catch(e) { if (!stop) setJournalError('Saved table storage could not be read. Enable browser storage and reload. No finalization or payment is available. ' + String((e as Error).message)); }
         }; void init(); return () => { stop = true; }; }, [meta.ready]);
     useEffect(() => { const onStorage = (e: StorageEvent) => { if (sRef.current.tableId && e.key === 'chit.final.' + sRef.current.tableId) { finalizing.current = true; setJournalError('This table was finalized in another tab. Reload to load its immutable details.'); } }; window.addEventListener('storage', onStorage); return () => window.removeEventListener('storage', onStorage); }, []);
     const SETTLE = ['items', 'charges', 'people', 'claims', 'shares', 'chargeMode', 'spread', 'collectorId', 'upi', 'printedTotal', 'hostName', 'externalCollector', 'collectorMode'] as const;
-    const setNow = (p: Partial<State>) => { const cur: any = sRef.current; const changed = SETTLE.some((k) => k in p && JSON.stringify((p as any)[k]) !== JSON.stringify(cur[k])); if (changed && (finalizing.current || cur.settlement || journal.current?.locked || (cur.tableId && localStorage.getItem('chit.final.' + cur.tableId)))) { setEditNotice('This table is frozen. Start a new bill for corrections.'); return; } const collectorPatch = p.externalCollector !== undefined ? { collectorId: '' } : {}; const next = { ...sRef.current, ...(changed && !('received' in p) ? { received: {} } : {}), ...p, ...collectorPatch }; sRef.current = next; setSaved(next); };
+    const hasDurableFinal=(tableId?:string)=>{try{return !!tableId&&!!localStorage.getItem('chit.final.'+tableId);}catch{setJournalError('Saved table storage is unavailable. Reload after enabling browser storage; do not pay from this screen.');return true;}};
+    const setNow = (p: Partial<State>) => { const cur: any = sRef.current; const changed = SETTLE.some((k) => k in p && JSON.stringify((p as any)[k]) !== JSON.stringify(cur[k])); if (changed && (finalizing.current || cur.settlement || journal.current?.locked || hasDurableFinal(cur.tableId))) { setEditNotice('This table is frozen. Start a new bill for corrections.'); return; } const collectorPatch = p.externalCollector !== undefined ? { collectorId: '' } : {}; const next = { ...sRef.current, ...(changed && !('received' in p) ? { received: {} } : {}), ...p, ...collectorPatch }; sRef.current = next; setSaved(next); };
     const set = (p: Partial<State>) => { if (meta.ready) setNow({ ...(p.step === 2 && p.gate === undefined ? { gate: true, current: s.people[0]?.id ?? s.current } : {}), ...p }); };
     const mode = s.mode ?? (s.items.length ? 'one' : 'pick');
     const version = JSON.stringify([s.items.map((i) => i.id + '|' + i.name + '|' + i.qty + '|' + i.total + '|' + (i.everyone ? 1 : 0)), s.people, s.claims, s.shares, s.charges, s.chargeMode, s.upi ?? '', s.hostName ?? '', s.printedTotal, s.externalCollector, s.settlement?.id]);
@@ -450,6 +451,7 @@ function Host({ onJoin }: { onJoin: (l: NonNullable<ReturnType<typeof envLink>>)
     const [sure, setSure] = useState(false);
     useEffect(() => { top.current?.scrollIntoView({ block: 'start' }); }, [s.step]);
     const finalize = async () => {
+        if(meta.message)throw Error('Your changes are not saved. Finalization and payment are blocked until storage works.');
         if (!journalReady || !journal.current) throw Error('Settlement storage is not ready.');
         if (finalizing.current) throw Error('Finalization is already running.');
         finalizing.current = true;
@@ -472,15 +474,15 @@ function Host({ onJoin }: { onJoin: (l: NonNullable<ReturnType<typeof envLink>>)
             <div className="ch-perf" aria-hidden>- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</div>
             {editNotice && <p className="sb-warn" role="status">{editNotice}</p>}
             {journalError && <p className="sb-warn" role="alert">{journalError}</p>}
-            {(!meta.ready || (!journalReady && !journalError)) ? <p className="sb-muted">Loading…</p> : journalError ? <p className="sb-warn">This table is blocked. Reload to reconcile, or start a new bill. Old payment instructions cannot be revoked.</p> : mode === 'pick' ? <section className="lv-card"><h2>New bill. Table for how many phones?</h2><button className="ch-door" type="button" onClick={() => setNow({ mode: 'one' })}><b>One phone</b><span>pass it around the table, everyone taps their dishes</span></button><p className="ch-or">or</p><button className="ch-door" type="button" onClick={() => setNow({ mode: 'live' })}><b>Everyone’s phones</b><span>scan to join, pick your own, host sees who owns what</span></button><p className="sb-muted sb-small">Have a join link someone sent you? Paste it:</p><input className="lv-in" aria-label="Join link" placeholder="Paste join link" value={code} onChange={(e) => { setCode(e.target.value); const l = parseLink(e.target.value); if (l) onJoin(l); }} /></section> : <>
+            {(!meta.ready || (!journalReady && !journalError)) ? <p className="sb-muted">Loading…</p> : journalError ? (meta.loadError ? null : <p className="sb-warn">This table is blocked. Reload to reconcile, or start a new bill. Old payment instructions cannot be revoked.</p>) : mode === 'pick' ? <section className="lv-card"><h2>New bill. Table for how many phones?</h2><button className="ch-door" type="button" onClick={() => setNow({ mode: 'one' })}><b>One phone</b><span>pass it around the table, everyone taps their dishes</span></button><p className="ch-or">or</p><button className="ch-door" type="button" onClick={() => setNow({ mode: 'live' })}><b>Everyone’s phones</b><span>scan to join, pick your own, host sees who owns what</span></button><p className="sb-muted sb-small">Have a join link someone sent you? Paste it:</p><input className="lv-in" aria-label="Join link" placeholder="Paste join link" value={code} onChange={(e) => { setCode(e.target.value); const l = parseLink(e.target.value); if (l) onJoin(l); }} /></section> : <>
                 {s.step === 0 && <BillStep s={s} set={set} />}
                 {s.step === 1 && mode !== 'live' && <PeopleStep s={s} set={set} />}
                 {s.step === 1 && mode === 'live' && <HostPanel s={s} host={host} setPay={(p) => set(p)} goClaim={() => set({ step: 2, gate: false, current: s.people[0]?.id ?? '' })} removePerson={(id) => set({ people: s.people.filter((p) => p.id !== id), claims: Object.fromEntries(Object.entries(s.claims).map(([k, v]) => [k, Object.fromEntries(Object.entries(v).filter(([q]) => q !== id))])), shares: Object.fromEntries(Object.entries(s.shares).map(([k, v]) => [k, v.filter((q) => q !== id)])) })} />}
                 {s.step === 2 && <ClaimStep s={s} set={set} />}
-                {s.step === 3 && <SplitStep s={s} set={set} finalize={finalize} />}
+                {s.step === 3 && !meta.message && <SplitStep s={s} set={set} finalize={finalize} />}
                 {s.step < 2 && !(mode === 'live' && s.step === 1) && <div className="sb-bar sb-bar-solo"><button className="sb-btn sb-block" type="button" disabled={!canNext} onClick={() => set({ step: (s.step + 1) as State['step'] })}>{label}</button></div>}
             </>}
-            {meta.message && <p className="sb-muted sb-small">{meta.message}</p>}
+            {meta.message && <p className="sb-warn" role="alert">{meta.message}</p>}
         </div>
     </FileCard>;
-                                                                                                                                                                                                                                        }
+}
