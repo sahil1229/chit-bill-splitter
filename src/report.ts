@@ -28,7 +28,7 @@ export function isFinal(r: ReportInput): { ok: boolean; why: string } {
     return { ok: true, why: '' };
 }
 
-const statusOf = (r: ReportInput, id: string) => (id === r.collectorId ? 'collecting' : r.received[id] ? 'received' : 'waiting');
+const statusOf = (r: ReportInput, id: string) => (id === r.collectorId ? 'collecting' : (r.res.people.find(p=>p.id===id)?.total??0)<=0 ? 'nothing' : r.received[id] ? 'received' : 'waiting');
 
 export function whatsappText(r: ReportInput): string {
     const col = r.externalCollector?.trim() ? { id: '', name: r.externalCollector.trim() } : r.people.find((p) => p.id === r.collectorId)!;
@@ -38,7 +38,7 @@ export function whatsappText(r: ReportInput): string {
     L.push('');
     for (const p of r.res.people) {
         if (p.id === r.collectorId) continue;
-        const st = statusOf(r, p.id) === 'received' ? ' ✅ received' : '';
+        const st = statusOf(r, p.id) === 'nothing' ? ' (nothing to pay)' : statusOf(r, p.id) === 'received' ? ' ✅ received' : '';
         L.push(`• ${p.name}: *${fmt(p.total)}*${st}`);
     }
     const mine = r.res.people.find((p) => p.id === r.collectorId);
@@ -55,9 +55,9 @@ export function whatsappText(r: ReportInput): string {
         if (shared.length) L.push(`Split equally between everyone: ${shared.join(', ')}.`);
     }
     if (r.spread) L.push('Items nobody claimed were split equally.');
-    if (r.upi.trim()) L.push(`Pay ${col.name} on UPI: ${r.upi.trim()}`);
+    if (r.upi.trim() && r.res.people.some(p=>p.id!==r.collectorId&&p.total>0)) L.push(`Pay ${col.name} on UPI: ${r.upi.trim()}`);
     const wait = r.people.filter((p) => statusOf(r, p.id) === 'waiting').map((p) => p.name);
-    L.push(wait.length ? `Not yet marked received: ${wait.join(', ')} (ticked by ${col.name} by hand).` : `${col.name} has marked everyone as received.`);
+    L.push(wait.length ? `Not yet marked received: ${wait.join(', ')} (ticked by ${col.name} by hand).` : r.res.people.some(p=>p.id!==r.collectorId&&p.total>0) ? `${col.name} has marked all amounts due as received.` : 'No transfers are due.');
     L.push('Detailed breakdown in the PDF.');
     return L.join('\n');
 }
@@ -130,7 +130,7 @@ export function buildPdf(r: ReportInput): Uint8Array {
         rect(M, y - sh, W - 2 * M, sh, '#FFFDF6', 1);
         const st = statusOf(r, p.id);
         text(p.name, M + 8, yy, 'F2', 10.5);
-        text(st === 'collecting' ? 'collecting (own share)' : st === 'received' ? 'COLLECTED (ticked)' : 'owes, not yet ticked', M + 200, yy, st === 'received' ? 'F2' : 'F1', 9.5, st === 'received' ? '#C2402A' : '#1C1917');
+        text(st === 'collecting' ? 'collecting (own share)' : st === 'nothing' ? 'nothing to pay' : st === 'received' ? 'COLLECTED (ticked)' : 'owes, not yet ticked', M + 200, yy, st === 'received' ? 'F2' : 'F1', 9.5, st === 'received' ? '#C2402A' : '#1C1917');
         mono(money(p.total), W - M - 8, yy, 10, true);
         y -= sh;
     });
