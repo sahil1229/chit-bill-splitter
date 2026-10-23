@@ -494,3 +494,12 @@ html, body, #root { background: #FBF7ED; }
 .lv-step output { min-width: 2ch; text-align: center; font-weight: 700; font-size: 17px; }
 .lv-step button { width: 44px; font-size: 20px; }
 .lv-item small { flex: 1 1 100%; }
+/* The one next step: always at the top, always obvious. */
+.ch-next { border: 2px solid #1C1917 !important; background: #fff8e1 !important; }
+.ch-next h2 { margin: 0; }
+.ch-next p { margin: 0; }
+.ch-next .sb-btn { text-align: center; }
+.ch-left { margin: 0; padding: 0; list-style: none; display: grid; gap: 4px; font-size: 14px; }
+.ch-left li { display: flex; justify-content: space-between; gap: 8px; border-bottom: 1px dotted #b9ae96; padding: 4px 0; }
+.ch-gpay { font-size: 18px !important; min-height: 56px !important; }
+.ch-switch { flex: 1 1 100%; min-height: 32px !important; font-size: 13px !important; padding: 0 !important; }

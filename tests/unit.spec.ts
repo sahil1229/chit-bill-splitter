@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { allocate, computeSplit, fmt, parseBill, toMinor } from '../src/engine';
+import { allocate, computeSplit, countedByDefault, fmt, parseBill, toMinor } from '../src/engine';
 import { finalizeSettlement, restoreSettlement, pinDinerPayment, type SettlementDraft } from '../src/settlement';
 import { HostEngine, MAX_BODY, Reassembler, linkFragment, newKeyPair, newSession, open, openHost, parseLink, seal, sealState, verify, type Snap } from '../src/live';
 import { appLinks, parsePayLink, payLink, platform, upiUrl } from '../src/upi';
@@ -41,6 +41,10 @@ test.describe('money', () => {
             expect(res.unassigned).toBe(0);
             expect(res.people.reduce((a, p) => a + p.total, 0)).toBe(326866);
         }
+    });
+    test('naans and drinks are counted by default; gravies are shared', () => {
+        for (const n of ['Garlic Naan', 'Butter Roti', 'Masala Cola', 'Fresh Lime Soda', 'Kingfisher Beer', 'Gulab Jamun', 'Masala Chai']) expect(countedByDefault(n)).toBe(true);
+        for (const n of ['Dal Makhani', 'Butter Chicken', 'Paneer Butter Masala', 'Veg Biryani', 'Jeera Rice', 'Chicken 65']) expect(countedByDefault(n)).toBe(false);
     });
     test('6 naans eaten 2, 1 and 3 are charged by count', () => {
         const naan = { id: 'n', name: 'Garlic Naan', qty: 6, total: 36000, everyone: false };
@@ -164,10 +168,12 @@ test.describe('upi', () => {
         expect(platform('Mozilla/5.0 (Linux; Android 14; Pixel 7)', 5)).toBe('android');
         expect(platform('Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)', 0)).toBe('other');
         const ios = appLinks(req, 'ios');
-        expect(ios.apps.map((a) => a.href.split('?')[0])).toEqual(['gpay://upi/pay', 'phonepe://pay', 'paytmmp://pay', 'upi://pay']);
+        expect(ios.primary!.href.split('?')[0]).toBe('gpay://upi/pay');
+        expect(ios.apps.map((a) => a.href.split('?')[0])).toEqual(['phonepe://pay', 'paytmmp://pay', 'upi://pay']);
         const android = appLinks(req, 'android');
-        expect(android.primary!.href).toBe(upiUrl(req));
-        expect(android.apps[0].href).toContain('#Intent;scheme=upi;package=com.google.android.apps.nbu.paisa.user;end');
+        expect(android.primary!.href).toContain('#Intent;scheme=upi;package=com.google.android.apps.nbu.paisa.user;end');
+        expect(android.apps.map((a) => a.id)).toEqual(['phonepe', 'paytm', 'any']);
+        expect(android.apps[2].href).toBe(upiUrl(req));
         expect(appLinks(req, 'other').apps).toHaveLength(0);
     });
     test('pay links round trip and reject junk', () => {

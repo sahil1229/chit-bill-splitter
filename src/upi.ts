@@ -36,15 +36,15 @@ const IOS_APPS: [string, string, string][] = [
 ];
 export function appLinks(r: PayRequest, p: Platform): { primary: AppLink | null; apps: AppLink[] } {
     const q = query(r);
-    if (p === 'android') return {
-        // Android shows its own chooser of every installed UPI app.
-        primary: { id: 'any', label: 'Pay with a UPI app', href: `upi://pay?${q}` },
-        apps: ANDROID_APPS.map(([id, label, pkg]) => ({ id, label, href: `intent://pay?${q}#Intent;scheme=upi;package=${pkg};end` })),
-    };
-    if (p === 'ios') return {
-        primary: null,
-        apps: [...IOS_APPS.map(([id, label, base]) => ({ id, label, href: `${base}?${q}` })), { id: 'any', label: 'Other UPI app', href: `upi://pay?${q}` }],
-    };
+    // Google Pay first; the rest, and "any UPI app" (Android's own chooser), underneath.
+    if (p === 'android') {
+        const [gpay, ...rest] = ANDROID_APPS.map(([id, label, pkg]) => ({ id, label, href: `intent://pay?${q}#Intent;scheme=upi;package=${pkg};end` }));
+        return { primary: gpay, apps: [...rest, { id: 'any', label: 'Other UPI app', href: `upi://pay?${q}` }] };
+    }
+    if (p === 'ios') {
+        const [gpay, ...rest] = IOS_APPS.map(([id, label, base]) => ({ id, label, href: `${base}?${q}` }));
+        return { primary: gpay, apps: [...rest, { id: 'any', label: 'Other UPI app', href: `upi://pay?${q}` }] };
+    }
     return { primary: null, apps: [] };
 }
 

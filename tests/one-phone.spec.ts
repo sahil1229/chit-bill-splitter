@@ -4,7 +4,7 @@ import { noProblems } from './helpers';
 
 test.afterEach(noProblems);
 
-test('one phone: bill to frozen split, QR, pay link on the payer phone, PDF and reload', async ({ browser }) => {
+test('one phone: bill to frozen split, payment links to the group and to one payer, PDF and reload', async ({ browser }) => {
     const host = await phone(browser, 'pixel');
     await host.goto('/');
     await host.getByRole('button', { name: /One phone/ }).click();
@@ -22,8 +22,8 @@ test('one phone: bill to frozen split, QR, pay link on the payer phone, PDF and 
     await host.getByRole('button', { name: 'Next: pass the phone' }).click();
 
     // Pass the phone round
-    // Single dishes are a tap; several of one dish are counted (6 naans: Asha 2, Bilal 1, Chitra 3)
-    const picks: Record<string, [string, number][]> = { Asha: [['Paneer Tikka', 1], ['Garlic Naan', 2]], Bilal: [['Butter Chicken', 2], ['Dal Makhani', 1], ['Garlic Naan', 1]], Chitra: [['Masala Cola', 4], ['Gulab Jamun', 2], ['Garlic Naan', 3]] };
+    // Dishes are a tap (2 Butter Chicken shared, here only by Bilal); naans and drinks are counted (6 naans: Asha 2, Bilal 1, Chitra 3)
+    const picks: Record<string, [string, number][]> = { Asha: [['Paneer Tikka', 1], ['Garlic Naan', 2]], Bilal: [['Butter Chicken', 1], ['Dal Makhani', 1], ['Garlic Naan', 1]], Chitra: [['Masala Cola', 4], ['Gulab Jamun', 2], ['Garlic Naan', 3]] };
     for (const [n, ds] of Object.entries(picks)) {
         await host.getByRole('button', { name: `${n} here. Show me the food` }).click();
         for (const [d, count] of ds) {
@@ -45,34 +45,36 @@ test('one phone: bill to frozen split, QR, pay link on the payer phone, PDF and 
     const bilal = await amount('Bilal');
     await expectNoHorizontalScroll(host);
 
-    // Freeze
-    await host.getByRole('button', { name: 'Review final details' }).click();
-    await host.getByRole('button', { name: 'Confirm and freeze table' }).click();
-    await expect(host.getByText('Finalized payment details')).toBeVisible();
+    // Freeze: one obvious next step, one confirm
+    await expect(host.locator('.ch-next')).toContainText('Check the amounts, then freeze');
+    await host.getByRole('button', { name: 'Freeze & send payment links' }).click();
+    await host.getByRole('button', { name: 'Yes, freeze' }).click();
+    await expect(host.locator('.ch-next')).toContainText('Send everyone their payment link');
 
-    // QR on the collector's phone carries the frozen amount for Bilal
-    const bilalCard = host.locator('.sb-person', { hasText: 'Bilal' });
-    await bilalCard.getByRole('button', { name: 'Show QR for Bilal' }).click();
-    const qr = upiParams((await bilalCard.locator('svg.lv-qr').getAttribute('data-url'))!);
-    expect(qr).toMatchObject({ pa: 'asha@okaxis', pn: 'Asha', cu: 'INR', am: bilal.replace(/[₹,]/g, '') });
+    // One message for the group carries every payer's link
+    await host.getByRole('button', { name: 'Send payment links to the group' }).click();
+    const group = await clipboard(host);
+    expect(group).toMatch(/Bilal: .*\n\s+Pay: https?:\/\/\S+#pay=/);
+    expect(group).toMatch(/Chitra: .*\n\s+Pay: https?:\/\/\S+#pay=/);
+    expect(group).not.toMatch(/Asha: .*\n\s+Pay:/); // the collector pays nobody
 
-    // Pay link goes to Bilal's own phone (iPhone) and opens UPI apps there
-    await bilalCard.getByRole('button', { name: 'Send Bilal a pay link' }).click();
-    const shared = await clipboard(host);
-    const link = shared.match(/https?:\/\/\S+#pay=\S+/)![0];
+    // Or one person at a time; it opens Google Pay first on Bilal's own iPhone
+    const bilalCard = card('Bilal');
+    await bilalCard.getByRole('button', { name: 'Send Bilal their payment link' }).click();
+    const link = (await clipboard(host)).match(/https?:\/\/\S+#pay=\S+/)![0];
     const bphone = await phone(browser, 'iphone');
     await bphone.goto(link);
     await expect(bphone.getByRole('heading', { name: 'Pay Asha' })).toBeVisible();
     await expect(bphone.locator('.lv-total b')).toHaveText(bilal);
-    const apps = bphone.locator('.ch-paybox a[data-app]');
-    await expect(apps).toHaveCount(4);
+    await expect(bphone.locator('a[data-app="gpay"]')).toHaveText(`Pay ${bilal} in Google Pay`);
+    await expect(bphone.locator('.ch-paybox a[data-app]')).toHaveCount(4);
+    const am = bilal.replace(/[₹,]/g, '');
     for (const [app, scheme] of [['gpay', 'gpay://upi/pay?'], ['phonepe', 'phonepe://pay?'], ['paytm', 'paytmmp://pay?'], ['any', 'upi://pay?']]) {
         const href = (await bphone.locator(`a[data-app="${app}"]`).getAttribute('href'))!;
         expect(href.startsWith(scheme)).toBe(true);
-        expect(upiParams(href)).toMatchObject({ pa: 'asha@okaxis', am: qr.am });
+        expect(upiParams(href)).toMatchObject({ pa: 'asha@okaxis', pn: 'Asha', am, cu: 'INR' });
     }
-    await bphone.getByRole('button', { name: /Show UPI QR/ }).click();
-    expect(upiParams((await bphone.locator('svg.lv-qr').getAttribute('data-url'))!).am).toBe(qr.am);
+    await expect(bphone.locator('svg.lv-qr')).toHaveCount(0);
     await expectNoHorizontalScroll(bphone);
 
     // Mark received; the group message carries pay links only for people still owing
@@ -90,8 +92,10 @@ test('one phone: bill to frozen split, QR, pay link on the payer phone, PDF and 
 
     // Reload keeps the frozen table, and edits stay blocked
     await host.reload();
-    await expect(host.getByText('Finalized payment details')).toBeVisible();
-    await expect(host.locator('.sb-person', { hasText: 'Bilal' }).getByText('COLLECTED')).toBeVisible();
+    await expect(host.locator('.ch-next')).toContainText('Send everyone their payment link');
+    await expect(card('Bilal').getByText('COLLECTED')).toBeVisible();
+    await card('Chitra').getByRole('switch').click();
+    await expect(host.locator('.ch-next')).toContainText('All paid ✓');
     await expect(host.getByRole('button', { name: /Bill$/ })).toBeDisabled();
 
     // New bill starts clean
@@ -117,16 +121,17 @@ test('one phone: unclaimed dishes can be split equally, external collector', asy
     await host.getByRole('button', { name: 'Done, pass on' }).click();
     await host.getByRole('button', { name: 'Esha here. Show me the food' }).click();
     await host.getByRole('button', { name: 'Done, see split' }).click();
-    await expect(host.getByText('₹60.00 nobody has claimed')).toBeVisible();
-    await host.getByRole('button', { name: 'Split it equally' }).click();
+    await expect(host.locator('.ch-next')).toContainText('Not ready to freeze yet');
+    await host.getByRole('button', { name: 'Split the rest equally' }).click();
     await expect(host.getByText('Every rupee is assigned and shares add up to the bill')).toBeVisible();
     await expect(host.locator('.sb-person', { hasText: 'Dev' }).locator('.sb-amt')).toHaveText('₹210.00');
     await expect(host.locator('.sb-person', { hasText: 'Esha' }).locator('.sb-amt')).toHaveText('₹30.00');
-    await host.getByRole('button', { name: 'Review final details' }).click();
-    await host.getByRole('button', { name: 'Confirm and freeze table' }).click();
-    const card = host.locator('.sb-person', { hasText: 'Esha' });
-    await card.getByRole('button', { name: 'Show QR for Esha' }).click();
-    expect(upiParams((await card.locator('svg.lv-qr').getAttribute('data-url'))!)).toMatchObject({ pa: 'mom@oksbi', pn: 'Mom', am: '30.00' });
+    await host.getByRole('button', { name: 'Freeze & send payment links' }).click();
+    await host.getByRole('button', { name: 'Yes, freeze' }).click();
+    await host.locator('.sb-person', { hasText: 'Esha' }).getByRole('button', { name: 'Send Esha their payment link' }).click();
+    const payer = await phone(browser, 'pixel');
+    await payer.goto((await clipboard(host)).match(/https?:\/\/\S+#pay=\S+/)![0]);
+    expect(upiParams((await payer.locator('a[data-app="gpay"]').getAttribute('href'))!)).toMatchObject({ pa: 'mom@oksbi', pn: 'Mom', am: '30.00' });
 });
 
 test('narrow 320px phone: every screen fits without sideways scrolling', async ({ browser }) => {
@@ -146,15 +151,32 @@ test('narrow 320px phone: every screen fits without sideways scrolling', async (
     await host.getByRole('button', { name: 'Done, pass on' }).click();
     await host.getByRole('button', { name: /here\. Show me the food/ }).click();
     await host.getByRole('button', { name: 'Done, see split' }).click();
-    await host.getByRole('button', { name: 'Split it equally' }).click();
-    await host.getByRole('button', { name: 'Review final details' }).click();
-    await host.getByRole('button', { name: 'Confirm and freeze table' }).click();
-    await host.locator('.sb-person', { hasText: 'Bilal' }).getByRole('button', { name: 'Show QR for Bilal' }).click();
+    await host.getByRole('button', { name: 'Split the rest equally' }).click();
+    await host.getByRole('button', { name: 'Freeze & send payment links' }).click();
+    await host.getByRole('button', { name: 'Yes, freeze' }).click();
     await expectNoHorizontalScroll(host);
-    await host.locator('.sb-person', { hasText: 'Bilal' }).getByRole('button', { name: 'Send Bilal a pay link' }).click();
+    await host.locator('.sb-person', { hasText: 'Bilal' }).getByRole('button', { name: 'Send Bilal their payment link' }).click();
     const link = (await clipboard(host)).match(/https?:\/\/\S+#pay=\S+/)![0];
     const payer = await phone(browser, 'narrow');
     await payer.goto(link);
-    await payer.getByRole('button', { name: /Show UPI QR/ }).click();
+    await expect(payer.locator('a[data-app="gpay"]')).toBeVisible();
     await expectNoHorizontalScroll(payer);
+});
+
+test('one phone: 2 gravies shared by 3 split equally by tapping', async ({ browser }) => {
+    const host = await phone(browser, 'pixel');
+    await host.goto('/');
+    await host.getByRole('button', { name: /One phone/ }).click();
+    await host.fill('#paste', '2 Dal Makhani 600.00\nTotal 600.00');
+    await host.getByRole('button', { name: 'Read items from text' }).click();
+    await host.getByRole('button', { name: 'Next: people' }).click();
+    for (const n of ['Asha', 'Bilal', 'Chitra']) { await host.getByLabel('Name', { exact: true }).fill(n); await host.getByRole('button', { name: 'Add', exact: true }).click(); }
+    await host.fill('#upi', 'asha@okaxis');
+    await host.getByRole('button', { name: 'Next: pass the phone' }).click();
+    for (const n of ['Asha', 'Bilal', 'Chitra']) {
+        await host.getByRole('button', { name: `${n} here. Show me the food` }).click();
+        await dish(host, 'Dal Makhani').click();
+        await host.getByRole('button', { name: n === 'Chitra' ? 'Done, see split' : 'Done, pass on' }).click();
+    }
+    for (const n of ['Asha', 'Bilal', 'Chitra']) await expect(host.locator('.sb-person').filter({ has: host.locator('.sb-pn strong', { hasText: new RegExp(`^${n}$`) }) }).locator('.sb-amt')).toHaveText('₹200.00');
 });

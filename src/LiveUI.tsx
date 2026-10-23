@@ -1,6 +1,6 @@
 import { pinDinerPayment, type DinerPayment } from './settlement';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { computeSplit, fmt, type Item, type Person } from './engine';
+import { computeSplit, countedByDefault, fmt, type Item, type Person } from './engine';
 import { onRelayBusy, store, Diner, HostEngine, Reassembler, hostSend, newSession, openHost, linkFragment, parseLink, subscribe, verify, type Link, type LiveState, type Snap, validUpi } from './live';
 import { PayOptions, Qr } from './Pay';
 import { shareBase } from './site';
@@ -91,36 +91,83 @@ export function useHost(read: () => HostSnap, write: (p: Partial<Snap>) => void,
     return { sess, starting, startError, start, close, reset, saveIdentity, remove, log: eng.current?.log ?? [] };
 }
 
-export function HostPanel({ s, host, goClaim, removePerson, setPay }: { s: HostSnap & { collectorId: string; collectorMode?: 'diner' | 'external'; externalCollector?: string; upi?: string; hostName?: string; approved?: string[] }; setPay: (p: { collectorMode?: 'diner' | 'external'; externalCollector?: string; upi?: string; hostName?: string; collectorId?: string; received?: Record<string, number>; approved?: string[] }) => void; host: ReturnType<typeof useHost>; goClaim: (personId?: string) => void; removePerson: (id: string) => void }) {
-    const { sess } = host; const busy = useRelayBusy(); useEffect(()=>{if(!sess&&!s.collectorMode)setPay({collectorMode:'diner',externalCollector:undefined});},[!!sess,s.collectorMode]);const [copied, setCopied] = useState(false); const [dn, setDn] = useState(s.hostName ?? ''); const [du, setDu] = useState(s.upi ?? ''); useEffect(() => { setDn(s.hostName ?? ''); setDu(s.upi ?? ''); }, [!!sess]); const payOk = validUpi(s.upi); const dirty = dn.trim() !== (s.hostName ?? '').trim() || du.trim() !== (s.upi ?? '').trim();
-    const [approveErr,setApproveErr]=useState('');useEffect(()=>{if(!sess||s.collectorMode!=='diner'||!s.collectorId)return;const k='chit.autoclaim.'+sess.link.topic;try{if(localStorage.getItem(k))return;localStorage.setItem(k,'1');}catch{return;}goClaim(s.collectorId);},[!!sess,s.collectorId]);
-    const res = useMemo(() => computeSplit({ ...s, spread: false }), [s]);
+export function HostPanel({ s, host, goClaim, goPay, removePerson, setPay }: { s: HostSnap & { collectorId: string; collectorMode?: 'diner' | 'external'; externalCollector?: string; upi?: string; hostName?: string; spread?: boolean }; setPay: (p: { collectorMode?: 'diner' | 'external'; externalCollector?: string; upi?: string; hostName?: string; collectorId?: string; received?: Record<string, number>; spread?: boolean }) => void; host: ReturnType<typeof useHost>; goClaim: (personId?: string) => void; goPay: () => void; removePerson: (id: string) => void }) {
+    const { sess } = host; const busy = useRelayBusy();
+    useEffect(() => { if (!sess && !s.collectorMode) setPay({ collectorMode: 'diner', externalCollector: undefined }); }, [!!sess, s.collectorMode]);
+    const [copied, setCopied] = useState(false); const [editPay, setEditPay] = useState(false);
+    const [dn, setDn] = useState(s.hostName ?? ''); const [du, setDu] = useState(s.upi ?? '');
+    useEffect(() => { setDn(s.hostName ?? ''); setDu(s.upi ?? ''); }, [!!sess, editPay]);
+    const res = useMemo(() => computeSplit({ ...s, spread: !!s.spread }), [s]);
+    const raw = useMemo(() => computeSplit({ ...s, spread: false }), [s]);
     const url = sess ? `${JOIN_BASE}#${linkFragment(sess.link)}` : '';
-    const unclaimed = s.items.filter((i) => !i.everyone && (res.unclaimedUnits[i.id] ?? 0) > 0);
-    if (s.settlement) { const st0 = s.settlement; const ok = s.approved ?? []; return <section className="lv-card"><h2>Approve payments, one person at a time</h2><p>Collector: {st0.collector.name}, {st0.collector.upi}</p><p className="sb-small">Nobody sees a pay button until you approve them here. An approval fixes that person's amount and the payee. It cannot be taken back, because a payment link that was already opened cannot be recalled. To correct anything, start a new table.</p><ul className="lv-list">{st0.shares.map((sh) => { const done = ok.includes(sh.personId); return <li key={sh.personId}><b>{sh.name}</b><span>{!sh.owesCollector ? 'Collector, nothing to send' : sh.amount === 0 ? 'Nothing to pay' : fmt(sh.amount)}</span>{sh.owesCollector && sh.amount > 0 && (done ? <em>Approved</em> : <button type="button" className="sb-btn" onClick={() => { if ((s.approved ?? []).includes(sh.personId)) return; try { const raw = localStorage.getItem('chit.split.v1'); const cur = raw ? JSON.parse(raw) : null; if (!cur || cur.tableId !== (s as any).tableId) throw Error('x'); const next = [...(cur.approved ?? []), sh.personId]; const text = JSON.stringify({ ...cur, approved: next }); localStorage.setItem('chit.split.v1', text); if (localStorage.getItem('chit.split.v1') !== text) throw Error('x'); setApproveErr(''); setPay({ approved: next }); } catch { setApproveErr('This approval was not saved on this phone, so this person was not approved. Free up browser storage and try again.'); } }}>Approve {sh.name} · {fmt(sh.amount)}</button>)}</li>; })}</ul>{approveErr && <p className="lv-warn" role="alert">{approveErr}</p>}<p className="sb-small">Opening a pay app never counts as paid. Tick received by hand in the Split step.</p></section>; }
-    if (!sess) return <section className="lv-card"><h2>Start with your plate</h2><p>Enter your name, claim what you ate, then invite friends by link or QR.</p><details><summary>How QR sharing and recovery work</summary><p className="sb-muted sb-small">Picks travel end-to-end encrypted through a free public relay (ntfy.sh). The relay sees only scrambled data, but it is best-effort with no uptime promise. The join link holds the key.</p><p className="lv-warn"><b>Keep this page open.</b> The table runs from this phone. If the page reloads, this phone tries to resume the same table from its own saved copy. That is not guaranteed, and everyone sees "Lost the host" until it does.</p></details><div className="ch-payee"><p>You are hosting and dining.</p><details><summary>Someone else is collecting, or I am not dining</summary><div className="sb-pills" role="radiogroup" aria-label="Collector type"><button type="button" role="radio" aria-checked={s.collectorMode === 'external'} onClick={() => setPay({ collectorMode: 'external', collectorId: '', externalCollector: s.hostName ?? '' })}>Not dining</button><button type="button" role="radio" aria-checked={s.collectorMode === 'diner'} onClick={() => setPay({ collectorMode: 'diner', externalCollector: undefined, collectorId: '' })}>I am dining too</button></div></details><label className="sb-label" htmlFor="hn">Your name</label><input id="hn" className="lv-in" value={s.hostName ?? ''} maxLength={30} placeholder="Your name" onChange={(e) => setPay({ hostName: e.target.value, ...(s.collectorMode === 'external' ? { externalCollector: e.target.value, collectorId: '' } : {}) })} /><details><summary>Payment details (optional for now)</summary><label className="sb-label" htmlFor="hupi">Collector UPI ID</label><input id="hupi" className="lv-in" inputMode="email" autoCapitalize="none" autoCorrect="off" placeholder="name@bank" value={s.upi ?? ''} onChange={(e) => setPay({ upi: e.target.value })} />{(s.upi ?? '').trim() && !validUpi(s.upi) && <p className="lv-rej">That does not look like a UPI ID (name@bank). Save a valid ID for the collector record. Payment links appear only after host finalization and diner review.</p>}<p className="sb-muted sb-small">Everyone at the table sees this ID and name (encrypted in transit). Only you can change it, from this phone. Nothing is paid from here.</p></details></div><button className="sb-btn sb-block" type="button" onClick={host.start} disabled={!s.items.length || !s.collectorMode || (s.collectorMode==='diner'&&!(s.hostName??'').trim()) || host.starting}>{host.starting?'Opening table…':s.items.length ? (s.collectorMode==='external'?'Open the table':'Pick my food') : 'Add the bill first'}</button>{!s.collectorMode&&<p className="lv-warn" role="status">Choose whether the collector is dining above before opening the table.</p>}{s.collectorMode==='diner'&&!(s.hostName??'').trim()&&<p className="lv-warn">Enter your name above so you can claim your own dishes on this phone.</p>}{host.startError&&<p className="lv-warn" role="alert">{host.startError}</p>}</section>;
-    return <section className="lv-card">
-        <h2>{sess.closed ? 'Table closed' : 'Scan to join'}</h2>
-        {!sess.closed && <><Qr text={url} /><p className="sb-small lv-status" data-s={sess.status}>{sess.status === 'live' ? '● Connected to the relay' : sess.status === 'connecting' ? '○ Connecting…' : '○ Reconnecting. New joins may be delayed.'}{sess.failed ? ' · Last update to diners failed, retrying on the next change.' : ''}</p>{busy && <BusyNote />}
-            <a className="sb-btn sb-block sb-a" href={url} target="_blank" rel="noopener noreferrer">Open join link</a><button className="sb-link" type="button" onClick={async () => { try { await navigator.clipboard.writeText(url); setCopied(true); } catch { setCopied(false); } }}>{copied ? 'Link copied' : 'Copy join link'}</button><p className="sb-small">Send the copied link to diners. Tapping it opens this same table without scanning the QR. The link contains the table key, so keep it inside your group.</p>
-            <p className="sb-muted sb-small">Anyone with this link can join and see the bill. Keep it inside your group. Keep this page open while people join. If it reloads, the table tries to resume with the same link. Diners see "Lost the host" until it does.</p></>}
-        <h3>Who is here ({s.people.length})</h3>{s.collectorMode==='diner'&&s.collectorId&&s.people.some(p=>p.id===s.collectorId)&&<button className="sb-btn sb-block" type="button" onClick={()=>goClaim(s.collectorId)}>Claim my dishes on this phone</button>}
-        {!s.people.length && <p className="sb-muted">Nobody yet.</p>}
-        <ul className="lv-list">{res.people.map((p) => <li key={p.id}><b>{p.name}</b>{res.people.filter((q) => q.name.trim().toLowerCase() === p.name.trim().toLowerCase()).length > 1 && <em className="lv-rej"> same name twice. If someone reloaded, remove the old one.</em>}<span>{p.lines.filter((l) => l.itemId !== 'unclaimed' && !s.items.find((i) => i.id === l.itemId)?.everyone).length} dishes · {fmt(p.total)}</span>{!sess.closed && <button className="sb-link" type="button" onClick={() => { host.remove(p.id); removePerson(p.id); }}>Remove</button>}</li>)}</ul>
-        {unclaimed.length > 0 && <div className="lv-warn" role="alert"><b>Nobody has had:</b><ul>{unclaimed.map((i) => <li key={i.id}>{i.name} × {res.unclaimedUnits[i.id]} ({fmt(Math.round((i.total / i.qty) * res.unclaimedUnits[i.id]))})</li>)}</ul><p>Talk it over, then claim it on your phone. I will keep this flag until it is claimed.</p></div>}
-        {s.items.length > 0 && unclaimed.length === 0 && s.people.length > 0 && <p className="lv-ok">Every dish has an owner.</p>}
-        {!sess.closed && <details className="lv-collect"><summary>Collector and payment details (optional)</summary><label className="sb-small">Name<input id="cn" value={dn} onChange={(e) => setDn(e.target.value)} /></label><label className="sb-small">UPI ID<input id="cu" value={du} autoCapitalize="none" autoCorrect="off" onChange={(e) => setDu(e.target.value)} /></label>
-            <p className={payOk ? 'sb-small lv-ok' : 'sb-small lv-warn'}>{payOk ? `Collector: ${(s.hostName ?? '').trim() || 'the host'} at ${s.upi}. Payment links appear after the host freezes the table and each diner reviews it.` : 'No valid collector UPI ID saved. Finalize the table before showing payment links.'}</p>
-            <button type="button" className="sb-pill" aria-pressed={s.externalCollector !== undefined} onClick={() => { setPay({ collectorMode: 'external', collectorId: '', externalCollector: s.hostName ?? '', received: {} }); }}>Collector is not dining</button>
-            {s.externalCollector !== undefined && <p className="sb-small">The collector name above is separate from the diners and does not change their shares.</p>}
-            {s.people.length > 0 && <><p className="sb-small">Which diner is the collector? (pick only if switching to a diner collector. This clears the previous UPI ID. Picking a different person clears the UPI ID, so enter their UPI ID above for the collector record. Finalize the table before showing payment links.)</p><div role="radiogroup" aria-label="Collector">{s.people.map((p) => <button key={p.id} type="button" role="radio" aria-checked={s.collectorId === p.id} className="sb-pill" onClick={() => { if (s.collectorId === p.id) return; setDn(p.name); setDu(''); setPay({ collectorMode: 'diner', collectorId: p.id, externalCollector: undefined, hostName: p.name, upi: '', received: {} }); }}>{p.name}</button>)}</div></>}
-            <button className="sb-btn" type="button" disabled={!dirty} onClick={() => setPay({ hostName: dn.trim(), upi: du.trim(), ...(s.externalCollector !== undefined ? { externalCollector: dn.trim() } : {}) })}>Update collector</button></details>}
-        {s.externalCollector && s.people.some(p => p.name.trim().toLowerCase() === s.externalCollector!.trim().toLowerCase()) && <p className="lv-warn">The outside collector has the same name as a diner. They are treated as different people: that diner still owes their share. Use a clearer collector name if they are different people, or choose the diner above.</p>}
-        <details><summary>Who had what</summary><ul className="lv-list">{s.items.filter((i) => !i.everyone).map((i) => { const who = s.people.filter((p) => (s.claims[i.id]?.[p.id] ?? 0) > 0 || s.shares[i.id]?.includes(p.id)); return <li key={i.id}><b>{i.name}</b><span>{who.length ? who.map((p) => `${p.name}${s.shares[i.id]?.includes(p.id) ? ' (shared)' : (s.claims[i.id]?.[p.id] ?? 0) > 1 || i.qty > 1 ? ` ×${s.claims[i.id]?.[p.id]}` : ''}`).join(', ') : 'nobody yet'}</span></li>; })}</ul></details>
-        <button className="sb-btn sb-block" type="button" onClick={()=>goClaim()}>Reassign on this phone</button>
-        {!sess.closed && <button className="sb-link" type="button" onClick={() => { void host.close().catch(() => {}); }}>Close the table</button>}
-        {host.log.length > 0 && <p className="sb-small sb-muted">Blocked: {host.log.length} attempt(s) to take over someone else's seat.</p>}
+    const unclaimed = s.items.filter((i) => !i.everyone && (raw.unclaimedUnits[i.id] ?? 0) > 0);
+    const left = unclaimed.reduce((a, i) => a + Math.round((i.total / i.qty) * raw.unclaimedUnits[i.id]), 0);
+    const external = s.collectorMode === 'external';
+    const hostIn = !external && s.people.some((p) => p.id === s.collectorId);
+    const guests = s.people.filter((p) => p.id !== s.collectorId).length;
+
+    // 1. Frozen: nothing left to do here.
+    if (s.settlement) return <section className="lv-card ch-next" data-next="collect">
+        <h2>Table frozen</h2>
+        <p>Everyone now sees their payment link on their own phone. Tick people off as the money arrives.</p>
+        <button type="button" className="sb-btn sb-block" onClick={goPay}>Track payments →</button>
     </section>;
+
+    // 2. Setup: who collects, then open the table.
+    if (!sess) {
+        const nameOk = !!(s.hostName ?? '').trim(); const upiOk = validUpi(s.upi);
+        return <section className="lv-card">
+            <h2>Set up the table</h2>
+            <p className="sb-small">Everyone pays one person: you. Add your details once.</p>
+            <label className="sb-label" htmlFor="hn">Your name</label>
+            <input id="hn" className="lv-in" value={s.hostName ?? ''} maxLength={30} placeholder="Your name" onChange={(e) => setPay({ hostName: e.target.value, ...(external ? { externalCollector: e.target.value, collectorId: '' } : {}) })} />
+            <label className="sb-label" htmlFor="hupi">Your UPI ID (everyone pays you here)</label>
+            <input id="hupi" className="lv-in" inputMode="email" autoCapitalize="none" autoCorrect="off" placeholder="name@okaxis" value={s.upi ?? ''} onChange={(e) => setPay({ upi: e.target.value })} />
+            {(s.upi ?? '').trim() && !upiOk && <p className="lv-rej">That does not look like a UPI ID. It looks like name@bank, for example sahil@okaxis.</p>}
+            <label className="sb-check"><input type="checkbox" checked={external} onChange={(e) => setPay(e.target.checked ? { collectorMode: 'external', collectorId: '', externalCollector: s.hostName ?? '' } : { collectorMode: 'diner', externalCollector: undefined, collectorId: '' })} /> I am not eating, just collecting the money</label>
+            <button className="sb-btn sb-block" type="button" onClick={host.start} disabled={!s.items.length || !nameOk || !upiOk || host.starting}>{host.starting ? 'Opening table…' : !s.items.length ? 'Add the bill first' : 'Open the table'}</button>
+            {s.items.length > 0 && (!nameOk || !upiOk) && <p className="sb-small sb-muted">Add your name and UPI ID to open the table.</p>}
+            {host.startError && <p className="lv-warn" role="alert">{host.startError}</p>}
+            <details><summary>How it works</summary><p className="sb-muted sb-small">Friends scan a QR, tick what they ate on their own phones, and you see it here. When everything is picked, you check the amounts and freeze the table; each person then gets a payment link for their share. Picks travel end-to-end encrypted through a free public relay (ntfy.sh). Keep this page open while people pick.</p></details>
+        </section>;
+    }
+
+    // 3. Open table: one clear next step at the top.
+    const next = sess.closed ? null
+        : guests === 0 ? { key: 'invite', title: 'Next: get everyone to scan the QR', body: 'Ask each person to scan this with their phone camera. They will tick what they ate.' }
+        : unclaimed.length > 0 && !s.spread ? { key: 'wait', title: `Waiting for picks: ${unclaimed.length} ${unclaimed.length === 1 ? 'dish' : 'dishes'} not picked yet`, body: `${fmt(left)} is not picked by anyone yet.` }
+        : { key: 'freeze', title: 'Everything is picked. Check and freeze', body: 'Look over everyone’s amount. Fix anything on your phone, then freeze the table to send payment links.' };
+    return <>
+        {next && <section className="lv-card ch-next" data-next={next.key}>
+            <h2>{next.title}</h2>
+            <p>{next.body}</p>
+            {next.key === 'wait' && <><ul className="ch-left">{unclaimed.map((i) => <li key={i.id}>{i.name}{i.qty > 1 ? ` × ${raw.unclaimedUnits[i.id]}` : ''} <span>{fmt(Math.round((i.total / i.qty) * raw.unclaimedUnits[i.id]))}</span></li>)}</ul>
+                <div className="ch-apps"><button type="button" className="sb-btn sb-small-btn" onClick={() => goClaim()}>Assign them on my phone</button><button type="button" className="sb-btn sb-ghost sb-small-btn" onClick={() => setPay({ spread: true })}>Split the rest equally</button></div></>}
+            {next.key === 'freeze' && <button type="button" className="sb-btn sb-block" onClick={goPay}>Review and freeze →</button>}
+            {s.spread && unclaimed.length > 0 && <p className="sb-small">Unpicked dishes are split equally. <button type="button" className="sb-link" onClick={() => setPay({ spread: false })}>Undo</button></p>}
+            {busy && <BusyNote />}
+        </section>}
+        <section className="lv-card">
+            {!sess.closed ? <>
+                <h2>Scan to join</h2>
+                <Qr text={url} label="QR code to join the table" />
+                <p className="sb-small lv-status" data-s={sess.status}>{sess.status === 'live' ? '● Connected' : sess.status === 'connecting' ? '○ Connecting…' : '○ Reconnecting. New joins may be delayed.'}{sess.failed ? ' · Last update did not go out; retrying.' : ''}</p>
+                <div className="ch-apps"><button className="sb-btn sb-ghost sb-small-btn" type="button" onClick={async () => { try { await navigator.clipboard.writeText(url); setCopied(true); } catch { setCopied(false); } }}>{copied ? 'Link copied' : 'Copy join link'}</button><a className="sb-link sb-a" href={url} target="_blank" rel="noopener noreferrer">Open join link</a></div>
+                <p className="sb-small sb-muted">The link holds the table key: share it only with your group. Keep this page open.</p>
+            </> : <h2>Table closed</h2>}
+            <h3>Who is here ({s.people.length})</h3>
+            {!s.people.length && <p className="sb-muted">Nobody yet.</p>}
+            <ul className="lv-list">{res.people.map((p) => <li key={p.id}><b>{p.name}{p.id === s.collectorId ? ' (you)' : ''}</b>{res.people.filter((q) => q.name.trim().toLowerCase() === p.name.trim().toLowerCase()).length > 1 && <em className="lv-rej"> same name twice. If someone reloaded, remove the old one.</em>}<span>{fmt(p.total)}</span>{!sess.closed && p.id !== s.collectorId && <button className="sb-link" type="button" onClick={() => { host.remove(p.id); removePerson(p.id); }}>Remove</button>}</li>)}</ul>
+            {hostIn && <button className="sb-btn sb-block" type="button" onClick={() => goClaim(s.collectorId)}>Pick my own dishes</button>}
+            <details><summary>Who had what</summary><ul className="lv-list">{s.items.filter((i) => !i.everyone).map((i) => { const who = s.people.filter((p) => (s.claims[i.id]?.[p.id] ?? 0) > 0 || s.shares[i.id]?.includes(p.id)); return <li key={i.id}><b>{i.name}</b><span>{who.length ? who.map((p) => `${p.name}${s.shares[i.id]?.includes(p.id) ? '' : i.qty > 1 ? ` ×${s.claims[i.id]?.[p.id]}` : ''}`).join(', ') : 'nobody yet'}</span></li>; })}</ul>
+                <button className="sb-btn sb-ghost sb-block" type="button" onClick={() => goClaim()}>Fix picks on my phone</button></details>
+            <div className="ch-payee"><p className="sb-small">Payments go to <b>{(s.hostName ?? '').trim() || 'you'}</b> · {s.upi} {!sess.closed && <button type="button" className="sb-link" onClick={() => setEditPay(!editPay)}>{editPay ? 'Cancel' : 'Change'}</button>}</p>
+                {editPay && <div className="lv-collect"><label className="sb-small">Name<input id="cn" value={dn} onChange={(e) => setDn(e.target.value)} /></label><label className="sb-small">UPI ID<input id="cu" value={du} autoCapitalize="none" autoCorrect="off" onChange={(e) => setDu(e.target.value)} /></label>
+                    <button className="sb-btn sb-small-btn" type="button" disabled={!dn.trim() || !validUpi(du)} onClick={() => { setPay({ hostName: dn.trim(), upi: du.trim(), ...(external ? { externalCollector: dn.trim() } : {}) }); setEditPay(false); }}>Save</button></div>}</div>
+            {!sess.closed && <button className="sb-link" type="button" onClick={() => { void host.close().catch(() => {}); }}>Close the table without splitting</button>}
+            {host.log.length > 0 && <p className="sb-small sb-muted">Blocked: {host.log.length} attempt(s) to take over someone else's seat.</p>}
+        </section>
+    </>;
 }
 
 export function DinerApp({ link }: { link: Link }) {
@@ -132,11 +179,11 @@ export function DinerApp({ link }: { link: Link }) {
     const dirty = useRef(false); const sendT = useRef<any>(null);
     const [payment, setPayment] = useState<DinerPayment | null>(null); const [paymentError, setPaymentError] = useState(''); const [paymentReviewed, setPaymentReviewed] = useState('');
     useEffect(() => { let cancelled = false; setPayment(null); setPaymentReviewed('');
-        if (!st?.settlement || !seatId || !joined || !(st.approved ?? []).includes(seatId)) return;
+        if (!st?.settlement || !seatId || !joined) return;
         const personId = seatId;
         void pinDinerPayment(st.settlement, link, personId, localStorage).then(p => { if (!cancelled) { setPayment(p); setPaymentError(''); } }).catch(e => { if (!cancelled) setPaymentError(String(e.message ?? e)); });
         return () => { cancelled = true; };
-    }, [st?.settlement?.id, st?.settlement?.digest, seatId, joined, (st?.approved ?? []).includes(seatId ?? '')]);
+    }, [st?.settlement?.id, st?.settlement?.digest, seatId, joined]);
 
     useEffect(() => { const onStorage = (e: StorageEvent) => {
         if (e.key !== 'chit.diner-final.' + link.topic + '.' + seatId) return;
@@ -163,7 +210,7 @@ export function DinerApp({ link }: { link: Link }) {
         setWant(c); setSh(s2); dirty.current = true; clearTimeout(sendT.current);
         sendT.current = setTimeout(async () => { const n = (d.current!.n += 1); setMyN(n); d.current!.save(name); dirty.current = false; const ok = await (await d.current!.claimsRaw(c, s2, n)); setSendFail(!ok); }, 1500);
     };
-    const [joining, setJoining] = useState(false); const busy = useRelayBusy();
+    const [joining, setJoining] = useState(false); const busy = useRelayBusy(); const [pref, setPref] = useState<Record<string, 'share' | 'count'>>({});
     // A retry after a slow or rate-limited join reuses the same seat, so the host never sees a duplicate.
     const join = async () => { if (joining) return; setJoining(true); setSendFail(false); try { const nm = name.trim() || 'Guest'; if (!d.current) { d.current = await new Diner(link).init(); setSeatId(d.current.pid); } await d.current.save(nm); const ok = await d.current.join(nm); setJoined(ok); setJoinAt(Date.now()); if (!ok) setSendFail(true); } finally { setJoining(false); } };
     useEffect(() => { (async () => { const x = new Diner(link); const nm = await x.restore(); if (nm) { d.current = x; setSeatId(x.pid); setName(nm); setMyN(x.n); await x.join(nm); setJoined(true); setJoinAt(Date.now()); } })(); }, []);
@@ -174,10 +221,17 @@ export function DinerApp({ link }: { link: Link }) {
     const acked = (st!.ack[pid] ?? 0) >= myN && !dirty.current;
     if (st!.settlement) {
         const currentPayment = payment?.settlementId === st!.settlement.id && payment?.digest === st!.settlement.digest;
-        const reviewed = !!payment && currentPayment && paymentReviewed === payment.digest;
-        const myShare = st!.settlement.shares.find((x) => x.personId === seatId);
-        if (!(st!.approved ?? []).includes(seatId ?? '')) return <section className="lv-card"><h2>Table finalized for {me.n}</h2>{myShare && !myShare.owesCollector ? <p>You are the collector. Nothing to send.</p> : myShare && myShare.amount === 0 ? <p>Nothing to pay.</p> : <p>Waiting for the host to approve your payment. No pay button until then.</p>}</section>;
-        return <section className="lv-card"><h2>Finalized for {me.n}</h2>{paymentError ? <p className="lv-warn" role="alert">{paymentError}</p> : (!payment || !currentPayment) ? <p>Checking and saving the signed settlement. No payment links yet.</p> : <><div className="lv-total"><span>Your frozen amount</span><b>{fmt(payment.amount)}</b></div><p>Collector: {payment.name}<br />UPI ID: {payment.upi}<br />Settlement: {payment.settlementId.slice(0, 8)}</p>{!payment.owesCollector ? <p>You are the collector. Do not transfer your own share to yourself.</p> : payment.amount === 0 ? <p>Nothing to pay.</p> : !reviewed ? <><p className="lv-warn">Check the collector name, UPI ID and amount with your host before opening your payment app.</p><button type="button" className="sb-btn" onClick={() => setPaymentReviewed(payment.digest)}>I checked these details</button></> : <div className="lv-paybox"><PayOptions req={{ pa: payment.upi, pn: payment.name, am: payment.amount, tn: 'CHIT ' + payment.settlementId.slice(0, 8) }} /></div>}</>}<p>This settlement cannot be edited. Corrections need a new table; old payment instructions cannot be revoked.</p></section>;
+        return <section className="lv-card ch-next" data-next="pay">
+            {paymentError ? <><h2>Do not pay yet</h2><p className="lv-warn" role="alert">{paymentError}</p></>
+            : (!payment || !currentPayment) ? <><h2>The bill is frozen</h2><p>Getting your payment ready…</p></>
+            : !payment.owesCollector ? <><h2>You are collecting</h2><p>Everyone else pays you. Your own share is {fmt(st!.settlement.shares.find((x) => x.personId === seatId)?.amount ?? 0)}.</p></>
+            : payment.amount === 0 ? <><h2>Nothing to pay</h2><p>Your share came to ₹0.</p></>
+            : <><h2>Pay {payment.name}</h2>
+                <div className="lv-total"><span>Your share</span><b>{fmt(payment.amount)}</b></div>
+                <p className="sb-small">To UPI ID <b>{payment.upi}</b></p>
+                <PayOptions req={{ pa: payment.upi, pn: payment.name, am: payment.amount, tn: 'CHIT ' + payment.settlementId.slice(0, 8) }} autoOpen={`${payment.settlementId}-${seatId}`} /></>}
+            <p className="sb-small sb-muted">The host froze this bill, so amounts cannot change. Settlement {st!.settlement.id.slice(0, 8)}.</p>
+        </section>;
     }
     const unclaimed = st!.items.filter((i) => !i.e && (Object.values(i.c) as number[]).reduce((a, b) => a + b, 0) === 0 && i.s.length === 0);
     return <section className="lv-card">
@@ -190,20 +244,27 @@ export function DinerApp({ link }: { link: Link }) {
             const mine = want[i.i] ?? 0; const shared = sh.includes(i.i); const rej = st!.rej[pid]?.[i.i];
             if (i.e) return <li key={i.i}><b>{i.n}</b><span>{fmt(i.t)} split by everyone</span></li>;
             const eaters = new Set<string>([...i.s, ...Object.keys(i.c).filter((k) => (i.c[k] ?? 0) > 0)]);
-            // Several of one dish (6 naans) are claimed by count; one dish is shared equally.
-            if (i.q > 1 && i.s.length === 0) {
-                const others = Object.entries(i.c).reduce((a, [k, v]) => a + (k === pid ? 0 : v), 0); const max = Math.max(0, i.q - others);
+            const others = Object.entries(i.c).reduce((a, [k, v]) => a + (k === pid ? 0 : v), 0);
+            const othersShared = i.s.filter((x) => x !== pid).length;
+            // One plate is shared. Several plates: gravies are shared by everyone who had some; naans and drinks are counted.
+            const mode: 'share' | 'count' = i.q <= 1 || i.s.length > 0 ? 'share' : others > 0 || mine > 0 ? 'count' : (pref[i.i] ?? (countedByDefault(i.n) ? 'count' : 'share'));
+            const canSwitch = i.q > 1 && others === 0 && othersShared === 0;
+            const switchTo = (m: 'share' | 'count') => { setPref({ ...pref, [i.i]: m }); if (mine > 0 || shared) push({ ...want, [i.i]: 0 }, sh.filter((x) => x !== i.i)); };
+            if (mode === 'count') {
+                const max = Math.max(0, i.q - others);
                 const set = (v: number) => push({ ...want, [i.i]: Math.max(0, Math.min(v, max)) }, sh.filter((x) => x !== i.i));
                 return <li key={i.i} className="lv-item"><b>{i.n}</b><span style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{fmt(i.t)} · {i.q} × {fmt(Math.round(i.t / i.q))}<br />{others ? `${others} taken by others · ` : ''}{i.q - others - mine} left</span>
                     <span className="lv-step" role="group" aria-label={`How many ${i.n} you had`}><button type="button" aria-label={`Fewer ${i.n}`} disabled={mine <= 0} onClick={() => set(mine - 1)}>−</button><output aria-live="polite">{mine}</output><button type="button" aria-label={`More ${i.n}`} disabled={mine >= max} onClick={() => set(mine + 1)}>+</button></span>
                     {mine > 0 && <small className="sb-small">You: {mine} of {i.q} · {fmt(Math.round(i.t * mine / i.q))}</small>}
+                    {canSwitch && <button type="button" className="sb-link ch-switch" onClick={() => switchTo('share')}>We shared these instead</button>}
                     {rej && <em className="lv-rej">{rej}</em>}</li>;
             }
-            const legacy = i.s.length === 0 && eaters.size > 0; const on = shared || (legacy && mine > 0); const count = eaters.size + (on && !eaters.has(pid) ? 1 : 0);
-            return <li key={i.i} className="lv-item"><b>{i.n}</b><span style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{fmt(i.t)}{i.q > 1 ? ` · ${i.q} ordered` : ''}<br />{count === 0 ? 'nobody yet' : count === 1 ? 'one eater' : `${count} eating · ${fmt(Math.round(i.t / count))} each`}</span>
-                {legacy ? <em className="lv-rej">Picked by units earlier ({mine ? `you ${mine} of ${i.q}` : 'not you'}). Ask the host to switch it to equal split.</em> : <button type="button" className={`lv-share ${on ? 'on' : ''}`} aria-pressed={on} onClick={() => push({ ...want, [i.i]: 0 }, on ? sh.filter((x) => x !== i.i) : [...sh, i.i])}>{on ? 'I had this ✓' : 'I had this'}</button>}
+            const on = shared; const count = eaters.size + (on && !eaters.has(pid) ? 1 : 0) - (!on && eaters.has(pid) ? 1 : 0);
+            return <li key={i.i} className="lv-item"><b>{i.n}</b><span style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{fmt(i.t)}{i.q > 1 ? ` · ${i.q} plates, shared` : ''}<br />{count === 0 ? 'nobody yet' : count === 1 ? 'one person' : `${count} sharing · ${fmt(Math.round(i.t / count))} each`}</span>
+                <button type="button" className={`lv-share ${on ? 'on' : ''}`} aria-pressed={on} onClick={() => push({ ...want, [i.i]: 0 }, on ? sh.filter((x) => x !== i.i) : [...sh, i.i])}>{on ? 'I had this ✓' : 'I had this'}</button>
+                {canSwitch && <button type="button" className="sb-link ch-switch" onClick={() => switchTo('count')}>Count how many I had instead</button>}
                 {rej && <em className="lv-rej">{rej}</em>}</li>; })}</ul>
         <div className="lv-total"><span>Your amount so far</span><b>{fmt(st!.tot[pid] ?? 0)}</b><small>{acked ? 'Saved with the host' : 'Sending…'} · changes if others pick more</small></div>
-        <div className="ch-pay lv-paybox" role="status"><p className="sb-small"><b>Payment comes later</b></p><p className="sb-small">When everyone has picked, the host freezes the table and approves each person one at a time. Your pay button appears here only after the host approves you. Your amount above is provisional until then.</p><p className="sb-muted sb-small">The app cannot verify payments. The collector records received payments by hand.</p></div>
+        <div className="lv-paybox" role="status"><p className="sb-small"><b>That’s it for now.</b> When everyone has picked, the host freezes the bill and your payment opens right here, ready for Google Pay. Keep this page open.</p></div>
     </section>;
 }

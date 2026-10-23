@@ -2,24 +2,29 @@ import { test, expect, type Page } from '@playwright/test';
 import { dish, expectNoHorizontalScroll, phone, upiParams } from './helpers';
 import { noProblems, problems } from './helpers';
 
-test.afterEach(noProblems);
+// No UPI app exists in the test browser, so the automatic Google Pay open logs this; anything else fails.
+const NO_APP = /Failed to launch '(intent|gpay|upi|phonepe|paytmmp):\/\/|scheme does not have a registered handler/;
+test.afterEach(() => { problems.splice(0, problems.length, ...problems.filter((p) => !NO_APP.test(p))); noProblems(); });
 
 const DISHES = ['Paneer Tikka', 'Butter Chicken', 'Garlic Naan', 'Dal Makhani', 'Veg Biryani', 'Chicken Biryani', 'Malai Kofta', 'Jeera Rice', 'Masala Papad', 'Tandoori Roti', 'Fish Curry', 'Prawn Fry', 'Gulab Jamun', 'Rasmalai', 'Masala Chai'];
 const BILL = DISHES.map((d, i) => `${d} ${200 + i * 10}.00`).join('\n') + '\nCGST 2.5% 90.00\nSGST 2.5% 90.00';
 
-async function hostBill(host: Page) {
+async function hostBill(host: Page, bill = BILL) {
     await host.goto('/');
     await host.getByRole('button', { name: /Everyone/ }).click();
-    await host.fill('#paste', BILL);
+    await host.fill('#paste', bill);
     await host.getByRole('button', { name: 'Read items from text' }).click();
-    await expect(host.getByText('Read 15 items')).toBeVisible();
     await host.getByRole('button', { name: 'Next: people' }).click();
 }
-async function joinUrl(host: Page) {
+async function openTable(host: Page, name: string, upi: string, eating = true) {
+    await host.fill('#hn', name);
+    await host.fill('#hupi', upi);
+    if (!eating) await host.getByLabel('I am not eating, just collecting the money').check();
+    await host.getByRole('button', { name: 'Open the table' }).click();
     const url = (await host.getByRole('link', { name: 'Open join link' }).getAttribute('href'))!;
     expect(url).toContain('/#join=');
     expect(url).not.toContain('?join');
-    await expect(host.getByText('Connected to the relay')).toBeVisible();
+    await expect(host.getByText('● Connected')).toBeVisible();
     return url;
 }
 async function join(p: Page, url: string, name: string) {
@@ -28,99 +33,128 @@ async function join(p: Page, url: string, name: string) {
     await p.getByRole('button', { name: 'Join' }).click();
     await expect(p.getByRole('heading', { name: 'Hi ' + name })).toBeVisible();
 }
-const pick = (p: Page, d: string) => p.locator('li.lv-item', { hasText: d }).getByRole('button').click();
+const item = (p: Page, d: string) => p.locator('li.lv-item', { hasText: d });
+const pick = (p: Page, d: string) => item(p, d).getByRole('button', { name: /^I had this/ }).click();
 const roster = (host: Page, name: string) => host.locator('.lv-list').first().locator(':scope > li', { hasText: name });
 const saved = (p: Page) => expect(p.getByText('Saved with the host')).toBeVisible();
+const next = (host: Page) => host.locator('.ch-next');
+const amt = (host: Page, n: string) => host.locator('.sb-person').filter({ has: host.locator('.sb-pn strong', { hasText: new RegExp(`^${n}$`) }) }).locator('.sb-amt');
+async function freeze(host: Page) {
+    await next(host).getByRole('button', { name: 'Review and freeze →' }).click();
+    await host.getByRole('button', { name: 'Freeze & send payment links' }).click();
+    await host.getByRole('button', { name: 'Yes, freeze' }).click();
+    await expect(next(host)).toContainText('Payment links sent');
+}
 
-test('live: host dining, Android + iPhone diners, reloads, removal, freeze, approve, UPI apps', async ({ browser }) => {
+test('live: host guided from invite to freeze; Android + iPhone diners get Google Pay straight away', async ({ browser }) => {
     const host = await phone(browser, 'pixel');
     await hostBill(host);
-    await host.fill('#hn', 'Sahil');
-    await host.getByText('Payment details (optional for now)').click();
-    await host.fill('#hupi', 'sahil@okaxis');
-    await host.getByRole('button', { name: 'Pick my food' }).click();
+    const url = await openTable(host, 'Sahil', 'sahil@okaxis');
+    await expect(next(host)).toContainText('Next: get everyone to scan the QR');
+
+    // Host picks their own dishes from the table screen
+    await host.getByRole('button', { name: 'Pick my own dishes' }).click();
     for (const d of DISHES.slice(0, 5)) await dish(host, d).click();
     await host.getByRole('button', { name: 'Done, invite friends' }).click();
-    const url = await joinUrl(host);
 
     const asha = await phone(browser, 'pixel'); const bilal = await phone(browser, 'iphone'); const spare = await phone(browser, 'pixel');
     await join(asha, url, 'Asha'); await join(bilal, url, 'Bilal'); await join(spare, url, 'Spare');
+    await expect(next(host)).toContainText('Waiting for picks');
     for (const d of DISHES.slice(5, 10)) await pick(asha, d);
     for (const d of DISHES.slice(10)) await pick(bilal, d);
     await saved(asha); await saved(bilal);
+    await expect(asha.getByText('your payment opens right here')).toBeVisible();
 
     // Host removes the accidental joiner; that phone is told
-    const spareRow = roster(host, 'Spare');
-    await spareRow.getByRole('button', { name: 'Remove' }).click();
-    await expect(spareRow).toHaveCount(0);
+    await roster(host, 'Spare').getByRole('button', { name: 'Remove' }).click();
+    await expect(roster(host, 'Spare')).toHaveCount(0);
     await expect(spare.getByRole('heading', { name: 'You are not on the list' })).toBeVisible();
-    await expect(host.getByText('Every dish has an owner.')).toBeVisible();
 
-    // Diner reload keeps the same seat and picks
+    // Reloads on both sides keep seats and picks
     await asha.reload();
     await expect(asha.getByRole('heading', { name: 'Hi Asha' })).toBeVisible();
-    await expect(asha.locator('li.lv-item', { hasText: 'Malai Kofta' }).getByRole('button')).toHaveAttribute('aria-pressed', 'true');
-    await expect(roster(host, 'Asha')).toHaveCount(1);
-    await expect(host.getByRole('heading', { name: 'Who is here (3)' })).toBeVisible();
-
-    // Host reload: diners keep getting updates afterwards
+    await expect(item(asha, 'Malai Kofta').getByRole('button', { name: /^I had this/ })).toHaveAttribute('aria-pressed', 'true');
     await host.reload();
-    await expect(host.getByText('Connected to the relay')).toBeVisible();
+    await expect(host.getByText('● Connected')).toBeVisible();
     await pick(asha, 'Masala Chai');
     await saved(asha);
-    await expect(bilal.locator('li.lv-item', { hasText: 'Masala Chai' })).toContainText('2 eating');
+    await expect(item(bilal, 'Masala Chai')).toContainText('2 sharing');
     await expectNoHorizontalScroll(asha); await expectNoHorizontalScroll(bilal); await expectNoHorizontalScroll(host);
 
-    // Freeze and approve
-    await host.getByRole('button', { name: /Split$/ }).click();
-    const frozen = { Asha: await host.locator('.sb-person', { hasText: 'Asha' }).locator('.sb-amt').innerText(), Bilal: await host.locator('.sb-person', { hasText: 'Bilal' }).locator('.sb-amt').innerText() };
-    expect(frozen).toEqual({ Asha: '₹1,580.00', Bilal: '₹1,490.00' });
-    await host.getByRole('button', { name: 'Review final details' }).click();
-    await host.getByRole('button', { name: 'Confirm and freeze table' }).click();
-    await expect(host.getByText('Finalized payment details')).toBeVisible();
-    await expect(asha.getByText('Waiting for the host to approve your payment')).toBeVisible();
-    await host.getByRole('button', { name: /Table$/ }).click();
-    await host.getByRole('button', { name: /^Approve Asha/ }).click();
-    await host.getByRole('button', { name: /^Approve Bilal/ }).click();
+    // Everything picked: the host is told what to do next
+    await expect(next(host)).toContainText('Everything is picked. Check and freeze');
+    await freeze(host);
+    await expect(amt(host, 'Asha')).toHaveText('₹1,580.00'); await expect(amt(host, 'Bilal')).toHaveText('₹1,490.00');
 
-    // Android: system chooser link plus per-app intents
-    await asha.getByRole('button', { name: 'I checked these details' }).click();
-    const primary = asha.locator('a[data-app="any"]');
-    await expect(primary).toHaveText('Pay with a UPI app · ₹1,580.00');
-    expect(upiParams((await primary.getAttribute('href'))!)).toMatchObject({ pa: 'sahil@okaxis', pn: 'Sahil', am: '1580.00', cu: 'INR' });
-    expect(await asha.locator('a[data-app="phonepe"]').getAttribute('href')).toMatch(/^intent:\/\/pay\?pa=sahil@okaxis&.*am=1580\.00.*package=com\.phonepe\.app;end$/);
-    // Tapping with no UPI app installed falls back to a clear message
-    await primary.click();
-    await expect(asha.getByText(/did not seem to open/)).toBeVisible({ timeout: 6000 });
+    // Android: Google Pay first, opened automatically; other apps and the system chooser underneath
+    await expect(asha.getByRole('heading', { name: 'Pay Sahil' })).toBeVisible();
+    const gpay = asha.locator('a[data-app="gpay"]');
+    await expect(gpay).toHaveText('Pay ₹1,580.00 in Google Pay');
+    expect(await gpay.getAttribute('href')).toMatch(/^intent:\/\/pay\?pa=sahil@okaxis&pn=Sahil&am=1580\.00&cu=INR&tn=CHIT%20\w+#Intent;scheme=upi;package=com\.google\.android\.apps\.nbu\.paisa\.user;end$/);
+    expect(upiParams((await asha.locator('a[data-app="any"]').getAttribute('href'))!)).toMatchObject({ pa: 'sahil@okaxis', am: '1580.00' });
+    await gpay.click();
+    await expect(asha.getByText('Google Pay did not open')).toBeVisible({ timeout: 6000 });
 
-    // iPhone: one button per app scheme
-    await bilal.getByRole('button', { name: 'I checked these details' }).click();
-    for (const [app, scheme] of [['gpay', 'gpay://upi/pay?'], ['phonepe', 'phonepe://pay?'], ['paytm', 'paytmmp://pay?'], ['any', 'upi://pay?']]) {
-        const href = (await bilal.locator(`a[data-app="${app}"]`).getAttribute('href'))!;
-        expect(href.startsWith(scheme)).toBe(true);
-        expect(upiParams(href)).toMatchObject({ pa: 'sahil@okaxis', am: '1490.00' });
-    }
-    await bilal.getByRole('button', { name: /Show UPI QR/ }).click();
-    expect(upiParams((await bilal.locator('svg.lv-qr').getAttribute('data-url'))!).am).toBe('1490.00');
+    // iPhone: Google Pay's own scheme first
+    await expect(bilal.getByRole('heading', { name: 'Pay Sahil' })).toBeVisible();
+    const igpay = (await bilal.locator('a[data-app="gpay"]').getAttribute('href'))!;
+    expect(igpay.startsWith('gpay://upi/pay?')).toBe(true);
+    expect(upiParams(igpay)).toMatchObject({ pa: 'sahil@okaxis', pn: 'Sahil', am: '1490.00', cu: 'INR' });
+    for (const [app, scheme] of [['phonepe', 'phonepe://pay?'], ['paytm', 'paytmmp://pay?'], ['any', 'upi://pay?']]) expect((await bilal.locator(`a[data-app="${app}"]`).getAttribute('href'))!.startsWith(scheme)).toBe(true);
+    await expect(bilal.locator('svg.lv-qr')).toHaveCount(0); // no payment QR codes
 
-    // Diner reload after payment approval: same frozen details come back
+    // Reload after freezing: same payment comes back
     await bilal.reload();
-    await bilal.getByRole('button', { name: 'I checked these details' }).click();
-    await expect(bilal.locator('a[data-app="gpay"]')).toBeVisible();
+    await expect(bilal.locator('a[data-app="gpay"]')).toHaveText('Pay ₹1,490.00 in Google Pay');
+
+    // Host ticks people off; the next step says when it is done
+    await host.getByRole('button', { name: /Table$/ }).click();
+    await expect(host.getByRole('heading', { name: 'Table frozen' })).toBeVisible();
+    await host.getByRole('button', { name: 'Track payments →' }).click();
+    for (const n of ['Asha', 'Bilal']) await host.locator('.sb-person').filter({ has: host.locator('.sb-pn strong', { hasText: new RegExp(`^${n}$`) }) }).getByRole('switch').click();
+    await expect(next(host)).toContainText('All paid ✓');
 });
 
-test('live: collector not dining, join by pasted link, close table', async ({ browser }) => {
+test('live: 2 gravies shared by 7 are split 7 ways; 6 naans are counted 2, 1 and 3', async ({ browser }) => {
+    test.setTimeout(180_000);
+    const host = await phone(browser, 'pixel');
+    await hostBill(host, '2 Dal Makhani 700.00\n6 Garlic Naan 360.00\nTotal 1060.00');
+    const url = await openTable(host, 'Mom', 'mom@oksbi', false);
+    const naans: Record<string, number> = { A: 2, B: 1, C: 3 };
+    const diners: Page[] = [];
+    for (const n of ['A', 'B', 'C', 'D', 'E', 'F', 'G']) {
+        const p = await phone(browser, n === 'B' ? 'iphone' : 'pixel'); diners.push(p);
+        await join(p, url, n);
+        await expect(item(p, 'Dal Makhani')).toContainText('2 plates, shared');
+        await pick(p, 'Dal Makhani');
+        for (let k = 0; k < (naans[n] ?? 0); k++) await p.getByRole('button', { name: 'More Garlic Naan' }).click();
+        await saved(p);
+    }
+    await expect(diners[6].getByRole('button', { name: 'More Garlic Naan' })).toBeDisabled(); // all 6 taken
+    await expect(item(diners[6], 'Dal Makhani')).toContainText('7 sharing · ₹100.00 each');
+    await freeze(host);
+    await expect(amt(host, 'A')).toHaveText('₹220.00'); await expect(amt(host, 'B')).toHaveText('₹160.00'); await expect(amt(host, 'C')).toHaveText('₹280.00'); await expect(amt(host, 'G')).toHaveText('₹100.00');
+    await expect(diners[1].locator('a[data-app="gpay"]')).toHaveText('Pay ₹160.00 in Google Pay');
+});
+
+test('live: a dish can switch between shared and counted while nobody else has picked it', async ({ browser }) => {
+    const host = await phone(browser, 'pixel');
+    await hostBill(host, '3 Masala Cola 240.00\n2 Paneer Butter Masala 600.00\nTotal 840.00');
+    const url = await openTable(host, 'Mom', 'mom@oksbi', false);
+    const a = await phone(browser, 'pixel'); await join(a, url, 'A');
+    await expect(item(a, 'Masala Cola').getByRole('button', { name: 'More Masala Cola' })).toBeVisible();
+    await item(a, 'Masala Cola').getByRole('button', { name: 'We shared these instead' }).click();
+    await expect(item(a, 'Masala Cola').getByRole('button', { name: /^I had this/ })).toBeVisible();
+    await item(a, 'Paneer Butter Masala').getByRole('button', { name: 'Count how many I had instead' }).click();
+    await a.getByRole('button', { name: 'More Paneer Butter Masala' }).click();
+    await saved(a);
+    await expect(item(a, 'Paneer Butter Masala')).toContainText('You: 1 of 2 · ₹300.00');
+});
+
+test('live: collector not dining, join by pasted link', async ({ browser }) => {
     const host = await phone(browser, 'iphone');
     await hostBill(host);
-    await host.getByText('Someone else is collecting, or I am not dining').click();
-    await host.getByRole('radio', { name: 'Not dining' }).click();
-    await host.fill('#hn', 'Mom');
-    await host.getByText('Payment details (optional for now)').click();
-    await host.fill('#hupi', 'mom@oksbi');
-    await host.getByRole('button', { name: 'Open the table' }).click();
-    const url = await joinUrl(host);
-
-    // Join by pasting the link on the start screen
+    const url = await openTable(host, 'Mom', 'mom@oksbi', false);
     const asha = await phone(browser, 'pixel');
     await asha.goto('/');
     await asha.getByLabel('Join link').fill(url);
@@ -131,78 +165,41 @@ test('live: collector not dining, join by pasted link, close table', async ({ br
     for (const d of DISHES.slice(0, 8)) await pick(asha, d);
     for (const d of DISHES.slice(8)) await pick(dev, d);
     await saved(asha); await saved(dev);
-    await expect(host.getByText('Every dish has an owner.')).toBeVisible();
     await expect(roster(host, 'Mom')).toHaveCount(0);
+    await freeze(host);
+    expect(upiParams((await dev.locator('a[data-app="gpay"]').getAttribute('href'))!)).toMatchObject({ pa: 'mom@oksbi', pn: 'Mom', am: '2260.00' });
+});
 
-    await host.getByRole('button', { name: /Split$/ }).click();
-    await host.getByRole('button', { name: 'Review final details' }).click();
-    await host.getByRole('button', { name: 'Confirm and freeze table' }).click();
-    await host.getByRole('button', { name: /Table$/ }).click();
-    await host.getByRole('button', { name: /^Approve Dev/ }).click();
-    await dev.getByRole('button', { name: 'I checked these details' }).click();
-    expect(upiParams((await dev.locator('a[data-app="any"]').getAttribute('href'))!)).toMatchObject({ pa: 'mom@oksbi', pn: 'Mom', am: '2260.00' });
-    await expect(asha.getByText('Waiting for the host to approve your payment')).toBeVisible();
+test('live: unpicked dishes can be split equally from the next-step card', async ({ browser }) => {
+    const host = await phone(browser, 'pixel');
+    await hostBill(host, 'Masala Dosa 180.00\nFilter Coffee 60.00\nTotal 240.00');
+    const url = await openTable(host, 'Mom', 'mom@oksbi', false);
+    const a = await phone(browser, 'pixel'); await join(a, url, 'A');
+    const b = await phone(browser, 'pixel'); await join(b, url, 'B');
+    await pick(a, 'Masala Dosa'); await saved(a);
+    await expect(next(host)).toContainText('1 dish not picked yet');
+    await next(host).getByRole('button', { name: 'Split the rest equally' }).click();
+    await expect(next(host)).toContainText('Everything is picked');
+    await freeze(host);
+    await expect(a.locator('a[data-app="gpay"]')).toHaveText('Pay ₹210.00 in Google Pay');
+    await expect(b.locator('a[data-app="gpay"]')).toHaveText('Pay ₹30.00 in Google Pay');
 });
 
 test('live: closing the table before freezing tells diners', async ({ browser }) => {
     const host = await phone(browser, 'pixel');
     await hostBill(host);
-    await host.fill('#hn', 'Sahil');
-    await host.getByRole('button', { name: 'Pick my food' }).click();
-    await host.getByRole('button', { name: 'Done, invite friends' }).click();
-    const url = await joinUrl(host);
+    const url = await openTable(host, 'Sahil', 'sahil@okaxis');
     const asha = await phone(browser, 'pixel'); await join(asha, url, 'Asha');
-    await host.getByRole('button', { name: 'Close the table' }).click();
+    await host.getByRole('button', { name: 'Close the table without splitting' }).click();
     await expect(host.getByRole('heading', { name: 'Table closed' })).toBeVisible();
     await expect(asha.getByRole('heading', { name: 'The table is closed' })).toBeVisible();
-});
-
-test('live: 6 naans eaten 2, 1 and 3 on separate phones are charged by count', async ({ browser }) => {
-    const host = await phone(browser, 'pixel');
-    await host.goto('/');
-    await host.getByRole('button', { name: /Everyone/ }).click();
-    await host.fill('#paste', '6 Garlic Naan 360.00\nTotal 360.00');
-    await host.getByRole('button', { name: 'Read items from text' }).click();
-    await host.getByRole('button', { name: 'Next: people' }).click();
-    await host.getByText('Someone else is collecting, or I am not dining').click();
-    await host.getByRole('radio', { name: 'Not dining' }).click();
-    await host.fill('#hn', 'Mom');
-    await host.getByText('Payment details (optional for now)').click();
-    await host.fill('#hupi', 'mom@oksbi');
-    await host.getByRole('button', { name: 'Open the table' }).click();
-    const url = await joinUrl(host);
-
-    const counts: [string, 'pixel' | 'iphone', number][] = [['Asha', 'pixel', 2], ['Bilal', 'iphone', 1], ['Chitra', 'pixel', 3]];
-    const phones: Record<string, Page> = {};
-    for (const [name, kind, n] of counts) {
-        const p = await phone(browser, kind); phones[name] = p; await join(p, url, name);
-        for (let k = 0; k < n; k++) await p.getByRole('button', { name: 'More Garlic Naan' }).click();
-        await saved(p);
-    }
-    // All 6 are taken: nobody can add a 7th
-    await expect(phones.Bilal.getByRole('button', { name: 'More Garlic Naan' })).toBeDisabled();
-    await expect(phones.Chitra.getByText('You: 3 of 6 · ₹180.00')).toBeVisible();
-    await expect(host.getByText('Every dish has an owner.')).toBeVisible();
-
-    await host.getByRole('button', { name: /Split$/ }).click();
-    const amt = (n: string) => host.locator('.sb-person', { hasText: n }).locator('.sb-amt');
-    await expect(amt('Asha')).toHaveText('₹120.00'); await expect(amt('Bilal')).toHaveText('₹60.00'); await expect(amt('Chitra')).toHaveText('₹180.00');
-    await host.getByRole('button', { name: 'Review final details' }).click();
-    await host.getByRole('button', { name: 'Confirm and freeze table' }).click();
-    await host.getByRole('button', { name: /Table$/ }).click();
-    await host.getByRole('button', { name: /^Approve Bilal/ }).click();
-    await phones.Bilal.getByRole('button', { name: 'I checked these details' }).click();
-    expect(upiParams((await phones.Bilal.locator('a[data-app="gpay"]').getAttribute('href'))!)).toMatchObject({ pa: 'mom@oksbi', am: '60.00' });
 });
 
 test('live: a rate-limited join waits, shows the relay is busy, and keeps one seat', async ({ browser, request }) => {
     test.skip(!!process.env.CHIT_URL, 'needs the local relay to simulate rate limits');
     const host = await phone(browser, 'pixel');
     await hostBill(host);
-    await host.fill('#hn', 'Sahil');
-    await host.getByRole('button', { name: 'Pick my food' }).click();
-    await host.getByRole('button', { name: 'Done, invite friends' }).click();
-    const url = await joinUrl(host);
+    const url = await openTable(host, 'Sahil', 'sahil@okaxis');
     const asha = await phone(browser, 'pixel');
     await asha.goto(url);
     await asha.getByLabel('Your name').fill('Asha');

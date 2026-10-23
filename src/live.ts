@@ -215,7 +215,7 @@ export class HostEngine {
     }
     state(): LiveState {
         const s = this.read();
-        const res = computeSplit({ ...s, spread: false });
+        const res = computeSplit({ ...s, spread: !!s.spread });
         const tot: Record<string, number> = {}; res.people.forEach((p) => (tot[p.id] = p.total));
         const ids = new Set(s.people.map((p) => p.id));
         return {

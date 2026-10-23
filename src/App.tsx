@@ -6,10 +6,10 @@ import { FileCard, useLocalState } from './shim-files';
 import { buildPdf, isFinal, pdfUnsupported, whatsappText, type ReportInput } from './report';
 import './style.css';
 import { parseLink, validUpi } from './live';
-import { PayPage, Qr } from './Pay';
-import { parsePayLink, payLink, upiUrl, type PayRequest } from './upi';
+import { PayPage } from './Pay';
+import { parsePayLink, payLink, type PayRequest } from './upi';
 import { recoverHostIdentity, DinerApp, HostPanel, envLink, useHost } from './LiveUI';
-import { Charge, ChargeMode, Claims, Shares, Item, Person, computeSplit, fmt, parseBill, toMinor, uid } from './engine';
+import { Charge, ChargeMode, Claims, Shares, Item, Person, computeSplit, countedByDefault, fmt, parseBill, toMinor, uid } from './engine';
 
 type State = {
     step: 0 | 1 | 2 | 3;
@@ -227,6 +227,7 @@ function ClaimStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
     const person = s.people.find((p) => p.id === s.current) ?? s.people[0];
     const res = useMemo(() => computeSplit(s), [s]);
     const [shareOpen, setShareOpen] = useState<string | null>(null); const [convert, setConvert] = useState<string | null>(null);
+    const [pref, setPref] = useState<Record<string, 'share' | 'count'>>({});
     if (!person) return <section className="sb-card"><p>Add people first.</p></section>;
     const idx = s.people.findIndex((p) => p.id === person.id);
     const next = s.people[idx + 1];
@@ -256,7 +257,10 @@ function ClaimStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
                 const room = it.qty - (taken - n); // most units this person could hold
                 const each = Math.round(it.total / it.qty);
                 const mineShared = sharedBy.some((p) => p.id === person.id);
-                const units = it.qty > 1 && !isShared && !it.everyone; // e.g. 6 naans: 2, 1 and 3
+                // Several plates: naans and drinks are counted (2, 1 and 3 of 6); gravies are shared by whoever had some.
+                const units = it.qty > 1 && !isShared && !it.everyone && (claimers.length > 0 || (pref[it.id] ?? (countedByDefault(it.name) ? 'count' : 'share')) === 'count');
+                const canSwitch = it.qty > 1 && !it.everyone && claimers.every((p) => p.id === person.id) && sharedBy.every((p) => p.id === person.id);
+                const switchTo = (m: 'share' | 'count') => { setPref({ ...pref, [it.id]: m }); const claims = { ...s.claims }; delete claims[it.id]; set({ claims, shares: { ...s.shares, [it.id]: [] } }); };
                 const mineOn = isShared ? mineShared : n > 0;
                 const toggleShare = (pid: string) => {
                     const cur = s.shares[it.id] ?? [];
@@ -280,7 +284,8 @@ function ClaimStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
                             <em>{units ? (taken ? `${claimers.map((p) => `${p.name} ${s.claims[it.id][p.id]}`).join(', ')} · ${left} of ${it.qty} left` : `${it.qty} × ${fmt(each)}, nobody yet`) : legacy ? `by units: ${claimers.map((p) => `${p.name} ${s.claims[it.id][p.id]}`).join(', ')}` : eaters === 0 ? 'nobody yet' : eaters === 1 ? 'one eater' : `${eaters} eating · ${fmt(Math.round(it.total / eaters))} each`}</em>
                         </span>}
                     </button>
-                    {units && <div className="sb-units"><span className="sb-small">{person.name} had</span><Stepper label={`${it.name} ${person.name} had`} value={n} min={0} max={room} onChange={(v) => setClaim(it.id, v)} /><span className="sb-small">of {it.qty}{n > 0 ? ` · ${fmt(Math.round(it.total * n / it.qty))}` : ''}</span></div>}
+                    {units && <div className="sb-units"><span className="sb-small">{person.name} had</span><Stepper label={`${it.name} ${person.name} had`} value={n} min={0} max={room} onChange={(v) => setClaim(it.id, v)} /><span className="sb-small">of {it.qty}{n > 0 ? ` · ${fmt(Math.round(it.total * n / it.qty))}` : ''}</span>{canSwitch && <button type="button" className="sb-link" onClick={() => switchTo('share')}>We shared these instead</button>}</div>}
+                    {!units && canSwitch && !it.everyone && <div className="sb-units"><button type="button" className="sb-link" onClick={() => switchTo('count')}>Count how many {person.name} had instead</button></div>}
                     {!it.everyone && <button type="button" className="sb-sharebtn" aria-expanded={shareOpen === it.id} onClick={() => legacy ? setConvert(it.id) : setShareOpen(shareOpen === it.id ? null : it.id)}>Who ate this</button>}
                 </li>
                 {convert === it.id && legacy && <li className="sb-sharepanel">
@@ -312,21 +317,8 @@ function ClaimStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
     </div>;
 }
 
-/** On the collector's phone: the payer scans this QR or opens the pay link on their own phone. */
-function CollectFrom({ req, name, share }: { req: PayRequest; name: string; share: (text: string, ok: string) => Promise<void> }) {
-    const [qr, setQr] = useState(false);
-    const link = payLink(req);
-    return <div className="ch-paybox">
-        <div className="ch-apps">
-            <button type="button" className="sb-btn sb-small-btn" aria-expanded={qr} onClick={() => setQr(!qr)}>{qr ? 'Hide QR' : `Show QR for ${name}`}</button>
-            <button type="button" className="sb-btn sb-ghost sb-small-btn" onClick={() => share(`Hi ${name}, your share of dinner is ${fmt(req.am)}. Pay ${req.pn} (${req.pa}) here: ${link}`, `Pay link for ${name} opened in the share sheet. That is a request, not a payment.`)}>Send {name} a pay link</button>
-        </div>
-        {qr && <><Qr text={upiUrl(req)} label={`UPI QR for ${name} to pay ${fmt(req.am)}`} /><p className="sb-small sb-muted">{name} scans this with any UPI app on their own phone. It fills in {req.pn}, {req.pa} and {fmt(req.am)}.</p></>}
-    </div>;
-}
-
 /* ---------- Step 4: split ---------- */
-function SplitStep({ s, set, finalize }: { s: State; set: (p: Partial<State>) => void; finalize: () => Promise<void> }) {
+function SplitStep({ s, set, finalize, goPick }: { s: State; set: (p: Partial<State>) => void; finalize: () => Promise<void>; goPick: () => void }) {
     const res = useMemo(() => computeSplit(s), [s]);
     const [open, setOpen] = useState<string | null>(null);
     const [msg, setMsg] = useState('');
@@ -338,8 +330,7 @@ function SplitStep({ s, set, finalize }: { s: State; set: (p: Partial<State>) =>
     useEffect(() => { const bad = Object.keys(s.received).filter((id) => s.received[id] && (id === s.collectorId || s.received[id] !== rk(res.people.find((p) => p.id === id)?.total ?? -1))); if (bad.length) set({ received: Object.fromEntries(Object.entries(s.received).filter(([id]) => !bad.includes(id))) }); }, [s.received, s.collectorId, s.upi, res]);
     const back = payers.filter((p) => s.received[p.id] === rk(p.total)).reduce((a, b) => a + b.total, 0);
     const pct = owed ? Math.round((back / owed) * 100) : 0;
-    const liveGate = s.mode === 'live'; const approvedFor = (id: string) => !liveGate || (s.approved ?? []).includes(id);
-    const payInfoOk = !liveGate || res.people.filter((q) => q.id !== s.collectorId && q.total > 0).every((q) => (s.approved ?? []).includes(q.id));
+    const live = s.mode === 'live';
     const frozenReq = (id: string): PayRequest | null => { const st = s.settlement; const sh = st?.shares.find((x) => x.personId === id); return st && sh && sh.owesCollector && sh.amount > 0 ? { pa: st.collector.upi, pn: st.collector.name, am: sh.amount, tn: 'CHIT ' + st.id.slice(0, 8) } : null; };
     const share = async (text: string, okMsg: string) => {
         try {
@@ -347,7 +338,7 @@ function SplitStep({ s, set, finalize }: { s: State; set: (p: Partial<State>) =>
             else { await navigator.clipboard.writeText(text); setMsg('Copied. Paste it into your group chat.'); }
         } catch { setMsg('Sharing was cancelled. Nothing was sent.'); }
     };
-        const rep: ReportInput = { externalCollector: s.externalCollector, printedTotal: s.printedTotal, res, items: s.items, charges: s.charges, people: s.people, collectorId: s.collectorId, upi: payInfoOk ? s.upi : '', received: Object.fromEntries(payers.filter((p) => s.received[p.id] === rk(p.total)).map((p) => [p.id, true])), payLinks: Object.fromEntries(payers.filter((p) => approvedFor(p.id)).flatMap((p) => { const r = frozenReq(p.id); return r ? [[p.id, payLink(r)]] : []; })), chargeMode: s.chargeMode, spread: s.spread, date: new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) };
+        const rep: ReportInput = { externalCollector: s.externalCollector, printedTotal: s.printedTotal, res, items: s.items, charges: s.charges, people: s.people, collectorId: s.collectorId, upi: s.upi, received: Object.fromEntries(payers.filter((p) => s.received[p.id] === rk(p.total)).map((p) => [p.id, true])), payLinks: Object.fromEntries(payers.flatMap((p) => { const r = frozenReq(p.id); return r ? [[p.id, payLink(r)]] : []; })), chargeMode: s.chargeMode, spread: s.spread, date: new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) };
     const fin = isFinal(rep);
     const waText = fin.ok ? whatsappText(rep) : '';
     const bad = pdfUnsupported(rep);
@@ -364,24 +355,38 @@ function SplitStep({ s, set, finalize }: { s: State; set: (p: Partial<State>) =>
         setTimeout(() => URL.revokeObjectURL(url), 30000);
         setMsg('Download requested, not confirmed. This page cannot tell if your browser saved the file. If nothing appeared, use Share message instead.');
     };
-    const summary = () => `🧾 Dinner split, total ${fmt(res.billTotal)}\n${payers.map((p) => `${p.name}: ${fmt(p.total)}`).join('\n')}\nPay ${collector?.name ?? 'the collector'}${s.upi.trim() && payInfoOk ? ` on UPI: ${s.upi.trim()}` : ''}.`;
-    const [review, setReview] = useState(false);
+    const [review, setReview] = useState(false); const [freezing, setFreezing] = useState(false);
+    const sendOne = (p: { id: string; name: string }) => { const r = frozenReq(p.id); if (r) void share(`Hi ${p.name}, your share of dinner is ${fmt(r.am)}. Tap to pay ${r.pn}: ${payLink(r)}`, `${p.name}'s payment link is ready to send. Pick them in the share sheet.`); };
+    const allIn = payers.length > 0 && back === owed;
     return <>
-        {s.settlement ? <section className="sb-card"><h2>Finalized payment details</h2><p>This table cannot be edited. Settlement {s.settlement.id.slice(0, 8)}: {s.settlement.collector.name}, {s.settlement.collector.upi}. Corrections need a new bill. Old payment links cannot be revoked.</p></section> : <section className="sb-card"><h2>Finalize this table</h2><p>Review every share above and the collector below. Finalizing permanently freezes people, claims, bill and collector for this table. Opening a UPI app never confirms payment.</p><p><b>{collector?.name || 'Choose collector'}</b>: {s.upi || 'Add UPI ID'}<br />Bill: {fmt(res.billTotal)}</p>{review ? <><p className="sb-warn">No edits after this. If you need a correction, start a new bill and tell everyone the old payment instructions cannot be revoked.</p><button type="button" className="sb-btn" disabled={!fin.ok || !validUpi(s.upi)} onClick={() => { void finalize().catch((e) => setMsg(String(e.message ?? e))); }}>Confirm and freeze table</button><button type="button" className="sb-link" onClick={() => setReview(false)}>Keep editing</button></> : <button type="button" className="sb-btn" disabled={!fin.ok || !validUpi(s.upi)} onClick={() => setReview(true)}>Review final details</button>}</section>}
+        {/* One next step, always at the top. */}
+        {!s.settlement ? (!fin.ok ? <section className="sb-card ch-next" data-next="notready">
+                <h2>Not ready to freeze yet</h2>
+                <p>{fin.why}</p>
+                <div className="ch-apps">{res.unassigned !== 0 && <button type="button" className="sb-btn sb-small-btn" onClick={() => set({ spread: true })}>Split the rest equally</button>}<button type="button" className="sb-btn sb-ghost sb-small-btn" onClick={goPick}>{live ? 'Back to the table' : 'Go back and pick'}</button></div>
+            </section> : !validUpi(s.upi) ? <section className="sb-card ch-next" data-next="upi">
+                <h2>Add the UPI ID to collect on</h2>
+                <p>Everyone pays {collector?.name || 'the collector'}. Add their UPI ID first.</p>
+                <button type="button" className="sb-btn sb-block" onClick={() => set({ step: 1 })}>Add UPI ID</button>
+            </section> : <section className="sb-card ch-next" data-next="freeze">
+                <h2>Check the amounts, then freeze</h2>
+                <p>Freezing locks every amount below and {live ? 'puts a Pay button on each person’s phone' : 'gives you a payment link for each person'}. Payments go to <b>{collector?.name}</b> · {s.upi.trim()}.</p>
+                {!review ? <button type="button" className="sb-btn sb-block" onClick={() => setReview(true)}>Freeze &amp; send payment links</button> : <>
+                    <p className="sb-warn">Amounts cannot be changed after this. To fix a mistake later you would start a new bill.</p>
+                    <div className="ch-apps"><button type="button" className="sb-btn sb-small-btn" disabled={freezing} onClick={() => { setFreezing(true); void finalize().catch((e) => setMsg(String(e.message ?? e))).finally(() => setFreezing(false)); }}>{freezing ? 'Freezing…' : 'Yes, freeze'}</button><button type="button" className="sb-btn sb-ghost sb-small-btn" onClick={() => setReview(false)}>Not yet</button></div>
+                </>}
+            </section>)
+        : allIn ? <section className="sb-card ch-next" data-next="done"><h2>All paid ✓</h2><p>{collector?.name} has ticked off everyone. Tap New bill at the top for the next one.</p></section>
+        : live ? <section className="sb-card ch-next" data-next="collect"><h2>Payment links sent</h2><p>Everyone now sees their amount and a Pay button on their own phone. Tick each person below when the money reaches {collector?.name}.</p></section>
+        : <section className="sb-card ch-next" data-next="send"><h2>Send everyone their payment link</h2><p>One message for your group with each person’s amount and a link that opens their UPI app. Then tick people off below as the money arrives.</p>
+            <button type="button" className="sb-btn sb-block" onClick={() => share(waText, 'Message ready. Pick your group chat to send it.')}>Send payment links to the group</button>
+            <button type="button" className="sb-link" onClick={copyWa}>Copy the message instead</button></section>}
         <section className="sb-receipt">
             <div className="sb-receipt-top"><span>BILL TOTAL</span><span>{res.people.length} PEOPLE</span></div>
             <strong className="sb-big">{fmt(res.billTotal)}</strong>
             {res.unassigned !== 0 ? <p className="sb-warn">Not fully assigned yet: {fmt(res.unassigned)} of {fmt(res.billTotal)} is unclaimed. Shares below cover only {fmt(res.billTotal - res.unassigned)}.</p> : res.reconciles ? <p className="sb-ok">✓ Every rupee is assigned and shares add up to the bill</p> : <p className="sb-warn">Shares add up to {fmt(res.sumOfParts)}; the bill is {fmt(res.billTotal)}. Check the bill step.</p>}
             {s.printedTotal !== null && s.printedTotal !== res.billTotal && <p className="sb-warn">Printed total was {fmt(s.printedTotal)}; items and charges here come to {fmt(res.billTotal)}.</p>}
         </section>
-        {res.unassigned !== 0 && <section className="sb-card sb-alert">
-            <h2>{fmt(res.unassigned)} nobody has claimed</h2>
-            <p className="sb-muted">{unclaimedList.map((i) => `${i.name} (${res.unclaimedUnits[i.id]})`).join(', ')}</p>
-            <div className="sb-row-btns">
-                <button className="sb-btn" type="button" onClick={() => set({ spread: true })}>Split it equally</button>
-                <button className="sb-btn sb-ghost" type="button" onClick={() => set({ step: 2, current: s.people[0]?.id ?? '', gate: true })}>Go back and claim</button>
-            </div>
-        </section>}
         {s.spread && <button className="sb-link" type="button" onClick={() => set({ spread: false })}>Unclaimed items are being split equally. Undo</button>}
 
         <section className="sb-settle" aria-label="Collected progress">
@@ -409,7 +414,7 @@ function SplitStep({ s, set, finalize }: { s: State; set: (p: Partial<State>) =>
                         <div className="sb-bl sb-sum"><span>Total</span><span>{fmt(p.total)}</span></div>
                     </div>}
                     {!isCollector && <div className="sb-pay">
-                        {!fin.ok ? <p className="sb-small sb-muted">Amount not final yet.</p> : p.total <= 0 ? <p className="sb-small sb-muted">Nothing to pay.</p> : done ? <p className="sb-small sb-muted">Received. Nothing more to pay.</p> : validUpi(s.upi) && s.settlement && !approvedFor(p.id) ? <p className="sb-small sb-muted">Not approved yet. Approve {p.name} in the Table step to release payment.</p> : validUpi(s.upi) && s.settlement && frozenReq(p.id) ? <CollectFrom req={frozenReq(p.id)!} name={p.name} share={share} /> : <p className="sb-small sb-muted">Finalize the table to get a pay QR and pay link for {p.name}.</p>}
+                        {s.settlement && !done && frozenReq(p.id) && <button type="button" className="sb-link" onClick={() => sendOne(p)}>{live ? `Resend ${p.name}'s payment link` : `Send ${p.name} their payment link`}</button>}
                         {p.total > 0 && <button type="button" role="switch" disabled={!s.settlement} aria-checked={done} className={`sb-got${done ? ' on' : ''}`} onClick={() => set({ received: { ...s.received, [p.id]: done ? 0 : rk(p.total) } })}>{done ? '✓ Received' : 'Mark received'}</button>}
                     </div>}
                 </li>;
@@ -417,7 +422,7 @@ function SplitStep({ s, set, finalize }: { s: State; set: (p: Partial<State>) =>
         </ul>
         {msg && <p className="sb-note" role="status">{msg}</p>}
         <section className="sb-card sb-export" aria-label="Share with the group">
-            <h2>Send it to the group</h2>
+            <h2>Summary for the group</h2>
             {!fin.ok && <p className="sb-warn">Not ready to share as a final split. {fin.why}</p>}
             {fin.ok && <>
                 <pre className="sb-wa" aria-label="WhatsApp message preview">{waText}</pre>
@@ -430,8 +435,7 @@ function SplitStep({ s, set, finalize }: { s: State; set: (p: Partial<State>) =>
                 <p className="sb-small sb-muted">Both are prepared for you to send. Nothing is posted by this page. Payment status in them is what you ticked by hand.</p>
             </>}
         </section>
-        {s.upi.trim() && <p className="sb-small sb-muted">“Pay” opens a UPI app on whoever taps it. They confirm and pay there. This page never moves money.</p>}
-        {!s.upi.trim() && <p className="sb-small sb-muted">Add {collector?.name ?? 'the collector'}’s UPI ID on the People step to get one-tap Pay buttons.</p>}
+        <p className="sb-small sb-muted">Payment links open the payer’s own UPI app with the amount filled in. This page never moves money and cannot see payments.</p>
     </>;
 }
 
@@ -481,7 +485,7 @@ function Host({ onJoin }: { onJoin: (l: NonNullable<ReturnType<typeof envLink>>)
         finalizing.current = true;
         const cur = sRef.current; const journalForOperation = journal.current; const tableForOperation = cur.tableId;
         try { if (cur.mode === 'live') await host.saveIdentity(cur.tableId!); } catch(e) { finalizing.current = false; throw e; }
-        const draft: SettlementDraft = { tableId: cur.tableId!, ...(cur.mode === 'live' ? { liveLink: (sRef.current.hostSess as any)?.link } : {}), items: cur.items, charges: cur.charges, people: cur.people, claims: cur.claims, shares: cur.shares, chargeMode: cur.chargeMode, spread: cur.mode === 'live' ? false : cur.spread, printedTotal: cur.printedTotal, collector: cur.externalCollector !== undefined ? { kind: 'external', name: cur.externalCollector, upi: cur.upi } : { kind: 'diner', dinerId: cur.collectorId, upi: cur.upi } };
+        const draft: SettlementDraft = { tableId: cur.tableId!, ...(cur.mode === 'live' ? { liveLink: (sRef.current.hostSess as any)?.link } : {}), items: cur.items, charges: cur.charges, people: cur.people, claims: cur.claims, shares: cur.shares, chargeMode: cur.chargeMode, spread: cur.spread, printedTotal: cur.printedTotal, collector: cur.externalCollector !== undefined ? { kind: 'external', name: cur.externalCollector, upi: cur.upi } : { kind: 'diner', dinerId: cur.collectorId, upi: cur.upi } };
         try { const settlement = await journalForOperation.finalize(draft); if (journal.current !== journalForOperation || sRef.current.tableId !== tableForOperation) throw Error('Table changed during finalization. Saved instructions were not applied to another table.'); const next = { ...sRef.current, settlement }; sRef.current = next; setSaved(next); }
         catch(e) { if (!journal.current.locked) finalizing.current = false; if (journal.current.locked) setJournalError('Finalization could not be confirmed. This table is blocked. Reload to reconcile saved details; do not pay from this screen.'); throw e; }
     };
@@ -501,9 +505,9 @@ function Host({ onJoin }: { onJoin: (l: NonNullable<ReturnType<typeof envLink>>)
             {(!meta.ready || (!journalReady && !journalError)) ? <p className="sb-muted">Loading…</p> : journalError ? (meta.loadError ? null : <p className="sb-warn">This table is blocked. Reload to reconcile, or start a new bill. Old payment instructions cannot be revoked.</p>) : mode === 'pick' ? <section className="lv-card"><h2>New bill. Table for how many phones?</h2><button className="ch-door" type="button" onClick={() => setNow({ mode: 'one' })}><b>One phone</b><span>pass it around the table, everyone taps their dishes</span></button><p className="ch-or">or</p><button className="ch-door" type="button" onClick={() => setNow({ mode: 'live' })}><b>Everyone’s phones</b><span>scan to join, pick your own, host sees who owns what</span></button><p className="sb-muted sb-small">Have a join link someone sent you? Paste it:</p><input className="lv-in" aria-label="Join link" placeholder="Paste join link" value={code} onChange={(e) => { setCode(e.target.value); const l = parseLink(e.target.value); if (l) onJoin(l); }} /></section> : <>
                 {s.step === 0 && <BillStep s={s} set={set} />}
                 {s.step === 1 && mode !== 'live' && <PeopleStep s={s} set={set} />}
-                {s.step === 1 && mode === 'live' && <HostPanel s={s} host={host} setPay={(p) => set(p)} goClaim={(personId) => set({ step: 2, gate: false, current: personId??s.people[0]?.id??'' })} removePerson={(id) => set({ people: s.people.filter((p) => p.id !== id), claims: Object.fromEntries(Object.entries(s.claims).map(([k, v]) => [k, Object.fromEntries(Object.entries(v).filter(([q]) => q !== id))])), shares: Object.fromEntries(Object.entries(s.shares).map(([k, v]) => [k, v.filter((q) => q !== id)])) })} />}
+                {s.step === 1 && mode === 'live' && <HostPanel s={s} host={host} setPay={(p) => set(p)} goPay={() => set({ step: 3 })} goClaim={(personId) => set({ step: 2, gate: false, current: personId??s.people[0]?.id??'' })} removePerson={(id) => set({ people: s.people.filter((p) => p.id !== id), claims: Object.fromEntries(Object.entries(s.claims).map(([k, v]) => [k, Object.fromEntries(Object.entries(v).filter(([q]) => q !== id))])), shares: Object.fromEntries(Object.entries(s.shares).map(([k, v]) => [k, v.filter((q) => q !== id)])) })} />}
                 {s.step === 2 && <ClaimStep s={s} set={set} />}
-                {s.step === 3 && !meta.message && <SplitStep s={s} set={set} finalize={finalize} />}
+                {s.step === 3 && !meta.message && <SplitStep s={s} set={set} finalize={finalize} goPick={() => set(mode === 'live' ? { step: 1 } : { step: 2, current: s.people[0]?.id ?? '', gate: true })} />}
                 {s.step < 2 && !(mode === 'live' && s.step === 1) && <div className="sb-bar sb-bar-solo"><button className="sb-btn sb-block" type="button" disabled={!canNext} onClick={() => set({ step: (s.step + 1) as State['step'] })}>{label}</button></div>}
             </>}
             {meta.message && <p className="sb-warn" role="alert">{meta.message}</p>}

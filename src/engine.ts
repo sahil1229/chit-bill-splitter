@@ -54,6 +54,10 @@ const TOTAL_RE = /\b(sub\s*-?\s*total|total|grand|net\s*amount|amount\s*due|bala
 const WATER_RE = /\bwater\b/i;
 const SKIP_RE = /\b(invoice|bill\s*no|table|date|time|gstin|phone|ph\b|tel|thank|cashier|server|pax|guests?|order\s*no|kot|fssai|address)\b/i;
 
+/** Dishes people usually eat individually (naan, drinks, desserts) are counted; the rest, like gravies, are shared. */
+const COUNTED_RE = /\b(naan|nan|roti|kulcha|paratha|parotta|chapati|chapatti|phulka|puri|poori|bhatura|pav|bun|appam|dosa|idli|vada|uttapam|cola|coke|pepsi|sprite|fanta|thums|limca|soda|water|juice|lassi|chaas|buttermilk|shake|smoothie|mocktail|cocktail|mojito|beer|lager|wine|whisk(?:e)?y|vodka|rum|gin|chai|tea|coffee|latte|cappuccino|espresso|jamun|ice\s?cream|kulfi|brownie|pastry|rasmalai|rasgulla|cupcake|sundae|egg|burger|sandwich|roll|wrap)s?\b/i;
+export const countedByDefault = (name: string) => COUNTED_RE.test(name);
+
 export type Parsed = { items: Item[]; charges: Charge[]; printedTotal: number | null; skipped: string[] };
 
 export function parseBill(text: string): Parsed {

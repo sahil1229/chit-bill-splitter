@@ -21,16 +21,19 @@ Deploy the Vite output in `dist` as a static HTTPS site. QR collaboration uses t
 - CHIT compresses each signed, encrypted update and splits it only if needed; a finalized 60-item, 30-diner table still fits in one message.
 - The host re-announces a quiet table every 75 seconds and groups bursts of picks into one update. Diners show "Lost the host" after 3 minutes without an update.
 
-## Payment workflow
+## How a table works
 
-1. Host checks the printed total, every dish, each person's share and collector name/UPI ID.
-2. Host explicitly reviews and freezes the table. Bill, people, claims and collector become immutable for that table.
-3. Each diner checks the signed, frozen collector and their own amount. Payment links appear only after review and a durable browser pin. Conflicting finalized details block payment for that table/seat, including after reload.
-4. Each payer pays from their own phone:
-   - Separate phones: after the host approves them, the diner's screen shows pay buttons. Android gets one "Pay with a UPI app" button (Android's own app chooser) plus Google Pay, PhonePe and Paytm. iPhone gets Google Pay (`gpay://`), PhonePe (`phonepe://`), Paytm (`paytmmp://`) and Other UPI app (`upi://`), because iOS cannot choose between apps that all claim `upi://`.
-   - One phone: on the collector's phone, each person gets "Show QR" (a standard UPI QR any UPI app can scan) and "Send a pay link". The pay link opens CHIT's pay screen with the same app buttons on the payer's phone.
-   - Every pay screen also has the UPI QR, "Save QR image" (for "scan from gallery") and copy buttons. If no app opens within 2.5 seconds, the page says so.
-5. Check payee and amount again in the UPI app. Opening an app is not payment confirmation. The collector marks received manually.
+Host (live mode):
+1. Add the bill (photo, text or by hand), then enter your name and UPI ID and open the table.
+2. Everyone scans the one table QR and ticks what they ate on their own phone. A card at the top always says the next step: invite, wait for picks (with "Assign them on my phone" or "Split the rest equally"), then "Review and freeze".
+3. Check the amounts, fix anything on your phone, and tap **Freeze & send payment links**. Amounts are locked from here.
+4. Each person's phone shows "Pay ₹X in Google Pay"; the app tries to open Google Pay once automatically (browsers may block that until a tap). Tick people off as money arrives.
+
+Picking dishes: one plate is shared by whoever taps "I had this". Several plates of a gravy are shared the same way (2 gravies, 7 people: 7 equal parts). Naans, rotis, drinks and desserts are counted instead (6 naans: 2, 1 and 3). Either mode can be switched per dish while nobody else has picked it.
+
+One phone: pass the phone round, then freeze and send one group message with each person's payment link (or send links one by one). Each link opens a pay screen on the payer's phone with Google Pay first.
+
+Payment links: Android gets Google Pay directly (Android intent), plus PhonePe, Paytm and "Other UPI app" (Android's chooser). iPhone gets Google Pay (`gpay://`), PhonePe (`phonepe://`), Paytm (`paytmmp://`) and Other UPI app (`upi://`). Copy UPI ID / amount are always there. Check payee and amount again in the UPI app. Opening an app is not payment confirmation; the collector marks received manually.
 
 Corrections require a new table. Old UPI links already opened in another app cannot be revoked. Tell diners about corrections before asking anyone to pay again. Web Locks and persistent browser storage are required; unsupported or failed storage blocks finalization/payment instead of guessing.
 
