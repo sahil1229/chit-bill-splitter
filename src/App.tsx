@@ -1,9 +1,11 @@
+import { SettlementJournal } from './settlement-journal';
+import type { Settlement, SettlementDraft } from './settlement';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { FileCard, useLocalState } from '@instinct/files';
 import { buildPdf, isFinal, pdfUnsupported, whatsappText, type ReportInput } from './report';
 import './style.css';
 import { parseLink, validUpi } from './live';
-import { DinerApp, HostPanel, envLink, useHost } from './LiveUI';
+import { recoverHostIdentity, DinerApp, HostPanel, envLink, useHost } from './LiveUI';
 import { Charge, ChargeMode, Claims, Shares, Item, Person, computeSplit, fmt, parseBill, toMinor, uid } from './engine';
 
 type State = {
@@ -17,6 +19,10 @@ type State = {
     chargeMode: ChargeMode;
     spread: boolean;
     collectorId: string;
+    externalCollector?: string;
+    collectorMode?: 'diner' | 'external';
+    tableId?: string;
+    settlement?: Settlement;
     upi: string;
     received: Record<string, string | number | boolean>;
     current: string;
@@ -161,7 +167,7 @@ function PeopleStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) 
         const n = name.trim();
         if (!n) return;
         const p = { id: uid('p'), name: n };
-        set({ people: [...s.people, p], collectorId: s.collectorId || p.id, current: s.current || p.id });
+        set({ people: [...s.people, p], collectorId: s.externalCollector !== undefined ? '' : s.collectorId || p.id, current: s.current || p.id });
         setName('');
     };
     const remove = (id: string) => {
@@ -169,7 +175,7 @@ function PeopleStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) 
         const claims: Claims = {};
         for (const k of Object.keys(s.claims)) { const { [id]: _drop, ...rest } = s.claims[k]; claims[k] = rest; }
         const shares: Shares = {}; for (const k of Object.keys(s.shares)) shares[k] = s.shares[k].filter((x) => x !== id);
-        set({ people, claims, shares, collectorId: s.collectorId === id ? people[0]?.id ?? '' : s.collectorId, current: s.current === id ? people[0]?.id ?? '' : s.current });
+        set({ people, claims, shares, collectorId: s.externalCollector !== undefined ? '' : s.collectorId === id ? people[0]?.id ?? '' : s.collectorId, current: s.current === id ? people[0]?.id ?? '' : s.current });
     };
     return <>
         <section className="sb-card">
@@ -189,8 +195,11 @@ function PeopleStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) 
             <h2>Who is collecting the money?</h2><p className="ch-note">Everyone pays this one person. They settle with the restaurant. Nobody has to be a hero twice.</p>
             <p className="sb-muted">Everyone else pays this person. They settle with the restaurant.</p>
             <div className="sb-pills" role="radiogroup" aria-label="Collector">
-                {s.people.map((p) => <button key={p.id} type="button" role="radio" aria-checked={s.collectorId === p.id} className="sb-pill" onClick={() => set(s.collectorId === p.id ? {} : { collectorId: p.id, upi: '', received: {} })}>{p.name}{s.people.filter((q) => q.name.trim().toLowerCase() === p.name.trim().toLowerCase()).length > 1 ? ` (#${s.people.filter((q) => q.name.trim().toLowerCase() === p.name.trim().toLowerCase()).findIndex((q) => q.id === p.id) + 1})` : ''}</button>)}
+                {s.people.map((p) => <button key={p.id} type="button" role="radio" aria-checked={s.collectorId === p.id} className="sb-pill" onClick={() => set(s.collectorId === p.id ? {} : { collectorId: p.id, externalCollector: undefined, upi: '', received: {} })}>{p.name}{s.people.filter((q) => q.name.trim().toLowerCase() === p.name.trim().toLowerCase()).length > 1 ? ` (#${s.people.filter((q) => q.name.trim().toLowerCase() === p.name.trim().toLowerCase()).findIndex((q) => q.id === p.id) + 1})` : ''}</button>)}
             </div>
+            <button type="button" className="sb-pill" aria-pressed={s.externalCollector !== undefined} onClick={() => set({ collectorId: '', externalCollector: '', upi: '', received: {} })}>Someone not dining</button>
+            {s.externalCollector !== undefined && <><label className="sb-label" htmlFor="external-collector">Collector name (not counted as a diner)</label><input id="external-collector" className="sb-input" value={s.externalCollector} onChange={(e) => set({ externalCollector: e.target.value })} /></>}
+            {s.externalCollector && s.people.some(p => p.name.trim().toLowerCase() === s.externalCollector!.trim().toLowerCase()) && <p className="sb-warn">The outside collector and a diner have the same name. They are separate people in this split, so that diner still owes their share. Use a clearer collector name, or select the diner instead.</p>}
             <label className="sb-label" htmlFor="upi">UPI ID of the collector (optional)</label>
             <input id="upi" className="sb-input" inputMode="email" autoCapitalize="none" autoCorrect="off" placeholder="name@bank" value={s.upi} onChange={(e) => set({ upi: e.target.value })} />
             {s.upi.trim() && !validUpi(s.upi) && <p className="sb-warn">That does not look like a UPI ID (name@bank). No pay buttons will show until it does.</p>}
@@ -285,15 +294,15 @@ function ClaimStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
 }
 
 /* ---------- Step 4: split ---------- */
-function SplitStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
+function SplitStep({ s, set, finalize }: { s: State; set: (p: Partial<State>) => void; finalize: () => Promise<void> }) {
     const res = useMemo(() => computeSplit(s), [s]);
     const [open, setOpen] = useState<string | null>(null);
     const [msg, setMsg] = useState('');
-    const collector = s.people.find((p) => p.id === s.collectorId);
+    const collector = s.externalCollector !== undefined ? { id: '', name: s.externalCollector } : s.people.find((p) => p.id === s.collectorId);
     const unclaimedList = s.items.filter((i) => !i.everyone && (res.unclaimedUnits[i.id] ?? 0) > 0);
     const payers = res.people.filter((p) => p.id !== s.collectorId);
     const owed = payers.reduce((a, b) => a + b.total, 0);
-    const rk = (n: number) => `${n}|${s.collectorId}|${s.upi.trim().toLowerCase()}`;
+    const rk = (n: number) => `${s.settlement?.id ?? 'draft'}|${n}|${s.collectorId}|${s.externalCollector ?? ''}|${s.upi.trim().toLowerCase()}`;
     useEffect(() => { const bad = Object.keys(s.received).filter((id) => s.received[id] && (id === s.collectorId || s.received[id] !== rk(res.people.find((p) => p.id === id)?.total ?? -1))); if (bad.length) set({ received: Object.fromEntries(Object.entries(s.received).filter(([id]) => !bad.includes(id))) }); }, [s.received, s.collectorId, s.upi, res]);
     const back = payers.filter((p) => s.received[p.id] === rk(p.total)).reduce((a, b) => a + b.total, 0);
     const pct = owed ? Math.round((back / owed) * 100) : 0;
@@ -305,7 +314,7 @@ function SplitStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
         } catch { setMsg('Sharing was cancelled. Nothing was sent.'); }
     };
     const request = (p: { name: string; total: number }) => share(`Hi ${p.name}, your share of dinner is ${fmt(p.total)}.${s.upi.trim() ? ` Pay ${collector?.name} on UPI: ${s.upi.trim()}` : ` Please pay ${collector?.name ?? 'me'}.`}`, `Request for ${p.name} opened in the share sheet. That is a request, not a payment.`);
-    const rep: ReportInput = { printedTotal: s.printedTotal, res, items: s.items, charges: s.charges, people: s.people, collectorId: s.collectorId, upi: s.upi, received: Object.fromEntries(payers.filter((p) => s.received[p.id] === rk(p.total)).map((p) => [p.id, true])), chargeMode: s.chargeMode, spread: s.spread, date: new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) };
+    const rep: ReportInput = { externalCollector: s.externalCollector, printedTotal: s.printedTotal, res, items: s.items, charges: s.charges, people: s.people, collectorId: s.collectorId, upi: s.upi, received: Object.fromEntries(payers.filter((p) => s.received[p.id] === rk(p.total)).map((p) => [p.id, true])), chargeMode: s.chargeMode, spread: s.spread, date: new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) };
     const fin = isFinal(rep);
     const waText = fin.ok ? whatsappText(rep) : '';
     const bad = pdfUnsupported(rep);
@@ -323,7 +332,9 @@ function SplitStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
         setMsg('Download requested, not confirmed. This page cannot tell if your browser saved the file. If nothing appeared, use Share message instead.');
     };
     const summary = () => `🧾 Dinner split, total ${fmt(res.billTotal)}\n${payers.map((p) => `${p.name}: ${fmt(p.total)}`).join('\n')}\nPay ${collector?.name ?? 'the collector'}${s.upi.trim() ? ` on UPI: ${s.upi.trim()}` : ''}.`;
+    const [review, setReview] = useState(false);
     return <>
+        {s.settlement ? <section className="sb-card"><h2>Finalized payment details</h2><p>This table cannot be edited. Settlement {s.settlement.id.slice(0, 8)}: {s.settlement.collector.name}, {s.settlement.collector.upi}. Corrections need a new bill. Old payment links cannot be revoked.</p></section> : <section className="sb-card"><h2>Finalize this table</h2><p>Review every share above and the collector below. Finalizing permanently freezes people, claims, bill and collector for this table. Opening a UPI app never confirms payment.</p><p><b>{collector?.name || 'Choose collector'}</b>: {s.upi || 'Add UPI ID'}<br />Bill: {fmt(res.billTotal)}</p>{review ? <><p className="sb-warn">No edits after this. If you need a correction, start a new bill and tell everyone the old payment instructions cannot be revoked.</p><button type="button" className="sb-btn" disabled={!fin.ok || !validUpi(s.upi)} onClick={() => { void finalize().catch((e) => setMsg(String(e.message ?? e))); }}>Confirm and freeze table</button><button type="button" className="sb-link" onClick={() => setReview(false)}>Keep editing</button></> : <button type="button" className="sb-btn" disabled={!fin.ok || !validUpi(s.upi)} onClick={() => setReview(true)}>Review final details</button>}</section>}
         <section className="sb-receipt">
             <div className="sb-receipt-top"><span>BILL TOTAL</span><span>{res.people.length} PEOPLE</span></div>
             <strong className="sb-big">{fmt(res.billTotal)}</strong>
@@ -365,8 +376,8 @@ function SplitStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
                         <div className="sb-bl sb-sum"><span>Total</span><span>{fmt(p.total)}</span></div>
                     </div>}
                     {!isCollector && <div className="sb-pay">
-                        {!fin.ok ? <p className="sb-small sb-muted">Amount not final yet.</p> : done ? <p className="sb-small sb-muted">Received. Nothing more to pay.</p> : validUpi(s.upi) ? <span className="ch-pay"><a className="sb-btn sb-small-btn sb-a" href={upiLink(p.total).replace('upi://', 'gpay://upi/')}>Open Google Pay · {fmt(p.total)}</a><a className="sb-link" href={upiLink(p.total)}>Other UPI app</a><button type="button" className="sb-link" onClick={async () => { try { await navigator.clipboard.writeText(`${s.upi.trim()} ${(p.total / 100).toFixed(2)}`); setMsg('Copied UPI ID and amount. Paste them into any UPI app.'); } catch { setMsg(`UPI ID ${s.upi.trim()}, amount ${(p.total / 100).toFixed(2)}`); } }}>Copy ID + amount</button></span> : <button type="button" className="sb-btn sb-small-btn" onClick={() => request(p)}>Request {fmt(p.total)}</button>}
-                        <button type="button" role="switch" aria-checked={done} className={`sb-got${done ? ' on' : ''}`} onClick={() => set({ received: { ...s.received, [p.id]: done ? 0 : rk(p.total) } })}>{done ? '✓ Received' : 'Mark received'}</button>
+                        {!fin.ok ? <p className="sb-small sb-muted">Amount not final yet.</p> : done ? <p className="sb-small sb-muted">Received. Nothing more to pay.</p> : validUpi(s.upi) && s.settlement ? <span className="ch-pay"><a className="sb-btn sb-small-btn sb-a" href={upiLink(p.total).replace('upi://', 'gpay://upi/')}>Open Google Pay · {fmt(p.total)}</a><a className="sb-link" href={upiLink(p.total)}>Other UPI app</a><button type="button" className="sb-link" onClick={async () => { try { await navigator.clipboard.writeText(`${s.upi.trim()} ${(p.total / 100).toFixed(2)}`); setMsg('Copied UPI ID and amount. Paste them into any UPI app.'); } catch { setMsg(`UPI ID ${s.upi.trim()}, amount ${(p.total / 100).toFixed(2)}`); } }}>Copy ID + amount</button></span> : !s.settlement ? <p className="sb-small sb-muted">Finalize the table before showing payment instructions.</p> : <button type="button" className="sb-btn sb-small-btn" onClick={() => request(p)}>Request {fmt(p.total)}</button>}
+                        <button type="button" role="switch" disabled={!s.settlement} aria-checked={done} className={`sb-got${done ? ' on' : ''}`} onClick={() => set({ received: { ...s.received, [p.id]: done ? 0 : rk(p.total) } })}>{done ? '✓ Received' : 'Mark received'}</button>
                     </div>}
                 </li>;
             })}
@@ -401,36 +412,64 @@ function Host({ onJoin }: { onJoin: (l: NonNullable<ReturnType<typeof envLink>>)
     const [saved, setSaved, meta] = useLocalState<State>('split.v1', EMPTY);
     const s: State = { ...EMPTY, ...saved };
     const sRef = useRef(s); sRef.current = s;
-    const SETTLE = ['items', 'charges', 'people', 'claims', 'shares', 'chargeMode', 'spread', 'collectorId', 'upi', 'printedTotal', 'hostName'] as const;
-    const setNow = (p: Partial<State>) => { const cur: any = sRef.current; const changed = SETTLE.some((k) => k in p && JSON.stringify((p as any)[k]) !== JSON.stringify(cur[k])); const next = { ...sRef.current, ...(changed && !('received' in p) ? { received: {} } : {}), ...p }; sRef.current = next; setSaved(next); };
+    const journal = useRef<SettlementJournal | null>(null);
+    const finalizing = useRef(false);
+    const [journalReady, setJournalReady] = useState(false);
+    const [journalError, setJournalError] = useState('');
+    const [editNotice, setEditNotice] = useState('');
+    useEffect(() => { if (!meta.ready) return; let stop = false;
+        const init = async () => { const tableId = sRef.current.tableId || crypto.randomUUID();
+            journal.current = new SettlementJournal(tableId, localStorage);
+            try { const settled = await journal.current.recover(); if (stop) return;
+                if (settled) { const d = journal.current.draft!; if (d.liveLink) { if (settled.hostBinding?.hostPub !== d.liveLink.hostPub || settled.hostBinding?.topic !== d.liveLink.topic) throw Error('Finalized table host binding mismatch.'); sRef.current = { ...sRef.current, mode: 'live', hostSess: await recoverHostIdentity(tableId, { ...(sRef.current.hostSess as any), link: d.liveLink }) }; } const next = { ...sRef.current, ...d, tableId, settlement: settled, collectorId: settled.collector.dinerId ?? '', externalCollector: settled.collector.kind === 'external' ? settled.collector.name : undefined, upi: settled.collector.upi, hostName: settled.collector.name }; sRef.current = next; setSaved(next); }
+                else if (sRef.current.settlement) { throw Error('A finalized table is missing its durable record. Editing and payment are blocked.'); }
+                else { const next = { ...sRef.current, tableId }; sRef.current = next; setSaved(next); }
+                setJournalReady(true);
+            } catch(e) { if (!stop) setJournalError(String((e as Error).message)); }
+        }; void init(); return () => { stop = true; }; }, [meta.ready]);
+    useEffect(() => { const onStorage = (e: StorageEvent) => { if (sRef.current.tableId && e.key === 'chit.final.' + sRef.current.tableId) { finalizing.current = true; setJournalError('This table was finalized in another tab. Reload to load its immutable details.'); } }; window.addEventListener('storage', onStorage); return () => window.removeEventListener('storage', onStorage); }, []);
+    const SETTLE = ['items', 'charges', 'people', 'claims', 'shares', 'chargeMode', 'spread', 'collectorId', 'upi', 'printedTotal', 'hostName', 'externalCollector', 'collectorMode'] as const;
+    const setNow = (p: Partial<State>) => { const cur: any = sRef.current; const changed = SETTLE.some((k) => k in p && JSON.stringify((p as any)[k]) !== JSON.stringify(cur[k])); if (changed && (finalizing.current || cur.settlement || journal.current?.locked || (cur.tableId && localStorage.getItem('chit.final.' + cur.tableId)))) { setEditNotice('This table is frozen. Start a new bill for corrections.'); return; } const collectorPatch = p.externalCollector !== undefined ? { collectorId: '' } : {}; const next = { ...sRef.current, ...(changed && !('received' in p) ? { received: {} } : {}), ...p, ...collectorPatch }; sRef.current = next; setSaved(next); };
     const set = (p: Partial<State>) => { if (meta.ready) setNow({ ...(p.step === 2 && p.gate === undefined ? { gate: true, current: s.people[0]?.id ?? s.current } : {}), ...p }); };
     const mode = s.mode ?? (s.items.length ? 'one' : 'pick');
-    const version = JSON.stringify([s.items.map((i) => i.id + '|' + i.name + '|' + i.qty + '|' + i.total + '|' + (i.everyone ? 1 : 0)), s.people, s.claims, s.shares, s.charges, s.chargeMode, s.upi ?? '', s.hostName ?? '', s.printedTotal]);
-    const host = useHost(() => sRef.current, (p) => { if (meta.ready) setNow(p as Partial<State>); }, version, meta.ready, { get: () => sRef.current.hostSess, set: (v) => { if (meta.ready) setNow({ hostSess: v }); } });
+    const version = JSON.stringify([s.items.map((i) => i.id + '|' + i.name + '|' + i.qty + '|' + i.total + '|' + (i.everyone ? 1 : 0)), s.people, s.claims, s.shares, s.charges, s.chargeMode, s.upi ?? '', s.hostName ?? '', s.printedTotal, s.externalCollector, s.settlement?.id]);
+    const host = useHost(() => ({ ...sRef.current, frozen: finalizing.current }), (p) => { if (meta.ready) setNow(p as Partial<State>); }, version, meta.ready && journalReady, { get: () => sRef.current.hostSess, set: (v) => { if (meta.ready) setNow({ hostSess: v }); } });
     const [code, setCode] = useState('');
     const top = useRef<HTMLDivElement>(null);
     const [sure, setSure] = useState(false);
     useEffect(() => { top.current?.scrollIntoView({ block: 'start' }); }, [s.step]);
+    const finalize = async () => {
+        if (!journalReady || !journal.current) throw Error('Settlement storage is not ready.');
+        if (finalizing.current) throw Error('Finalization is already running.');
+        finalizing.current = true;
+        const cur = sRef.current; const journalForOperation = journal.current; const tableForOperation = cur.tableId;
+        try { if (cur.mode === 'live') await host.saveIdentity(cur.tableId!); } catch(e) { finalizing.current = false; throw e; }
+        const draft: SettlementDraft = { tableId: cur.tableId!, ...(cur.mode === 'live' ? { liveLink: (sRef.current.hostSess as any)?.link } : {}), items: cur.items, charges: cur.charges, people: cur.people, claims: cur.claims, shares: cur.shares, chargeMode: cur.chargeMode, spread: cur.mode === 'live' ? false : cur.spread, printedTotal: cur.printedTotal, collector: cur.externalCollector !== undefined ? { kind: 'external', name: cur.externalCollector, upi: cur.upi } : { kind: 'diner', dinerId: cur.collectorId, upi: cur.upi } };
+        try { const settlement = await journalForOperation.finalize(draft); if (journal.current !== journalForOperation || sRef.current.tableId !== tableForOperation) throw Error('Table changed during finalization. Saved instructions were not applied to another table.'); const next = { ...sRef.current, settlement }; sRef.current = next; setSaved(next); }
+        catch(e) { if (!journal.current.locked) finalizing.current = false; if (journal.current.locked) setJournalError('Finalization could not be confirmed. This table is blocked. Reload to reconcile saved details; do not pay from this screen.'); throw e; }
+    };
     const canNext = s.step === 0 ? s.items.length > 0 : s.step === 1 ? s.people.length > 0 : true;
     const label = s.step === 0 ? 'Next: people' : 'Next: pass the phone';
     return <FileCard>
         <div className="sb-app" ref={top}>
             <header className="sb-top">
-                <div className="sb-title"><div className="ch-mark"><span className="ch-stars">* * *</span><h1>CHIT</h1><span className="ch-tag">THE BILL, SPLIT FAIR &amp; SQUARE</span></div>{s.items.length > 0 && <button className="sb-link" type="button" onClick={() => { if (sure) { setSure(false); void (async () => { if (host.sess && !host.sess.closed) await host.close(); host.reset(); sRef.current = EMPTY; setSaved(EMPTY); })(); } else { setSure(true); setTimeout(() => setSure(false), 4000); } }}>{sure ? 'Tap again to clear' : 'New bill'}</button>}</div>
+                <div className="sb-title"><div className="ch-mark"><span className="ch-stars">* * *</span><h1>CHIT</h1><span className="ch-tag">THE BILL, SPLIT FAIR &amp; SQUARE</span></div>{s.items.length > 0 && <button className="sb-link" type="button" onClick={() => { if (sure) { if (finalizing.current && !s.settlement) { setJournalError('Finalization is unresolved. Reload to reconcile before starting another table.'); return; } setSure(false); void (async () => { if (host.sess && !host.sess.closed) await host.close(true); host.reset(); const next = { ...EMPTY, tableId: crypto.randomUUID() }; journal.current = new SettlementJournal(next.tableId, localStorage); await journal.current.recover(); sRef.current = next; setSaved(next); setJournalError(''); finalizing.current = false; setJournalReady(true); })(); } else { setSure(true); setTimeout(() => setSure(false), 4000); } }}>{sure ? (s.settlement ? 'Old links stay valid. Start new?' : 'Tap again to clear') : 'New bill'}</button>}</div>
                 <ol className="sb-steps" aria-label="Steps">
-                    {STEPS.map((t0, i) => { const t = mode === 'live' && i === 1 ? 'Table' : t0; return <li key={t}><button type="button" aria-current={s.step === i ? 'step' : undefined} disabled={(i > 0 && !s.items.length) || (i > 1 && !s.people.length)} onClick={() => set({ step: i as State['step'] })}><span>{i + 1}</span>{t}</button></li>; })}
+                    {STEPS.map((t0, i) => { const t = mode === 'live' && i === 1 ? 'Table' : t0; return <li key={t}><button type="button" aria-current={s.step === i ? 'step' : undefined} disabled={(!!s.settlement && i !== 3 && !(mode === 'live' && i === 1)) || (i > 0 && !s.items.length) || (i > 1 && !s.people.length)} onClick={() => set({ step: i as State['step'] })}><span>{i + 1}</span>{t}</button></li>; })}
                 </ol>
             </header>
             <div className="ch-perf" aria-hidden>- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</div>
-            {!meta.ready ? <p className="sb-muted">Loading…</p> : mode === 'pick' ? <section className="lv-card"><h2>New bill. Table for how many phones?</h2><button className="ch-door" type="button" onClick={() => setNow({ mode: 'one' })}><b>One phone</b><span>pass it around the table, everyone taps their dishes</span></button><p className="ch-or">or</p><button className="ch-door" type="button" onClick={() => setNow({ mode: 'live' })}><b>Everyone’s phones</b><span>scan to join, pick your own, host sees who owns what</span></button><p className="sb-muted sb-small">Have a join link someone sent you? Paste it:</p><input className="lv-in" aria-label="Join link" placeholder="Paste join link" value={code} onChange={(e) => { setCode(e.target.value); const l = parseLink(e.target.value); if (l) onJoin(l); }} /></section> : <>
+            {editNotice && <p className="sb-warn" role="status">{editNotice}</p>}
+            {journalError && <p className="sb-warn" role="alert">{journalError}</p>}
+            {(!meta.ready || (!journalReady && !journalError)) ? <p className="sb-muted">Loading…</p> : journalError ? <p className="sb-warn">This table is blocked. Reload to reconcile, or start a new bill. Old payment instructions cannot be revoked.</p> : mode === 'pick' ? <section className="lv-card"><h2>New bill. Table for how many phones?</h2><button className="ch-door" type="button" onClick={() => setNow({ mode: 'one' })}><b>One phone</b><span>pass it around the table, everyone taps their dishes</span></button><p className="ch-or">or</p><button className="ch-door" type="button" onClick={() => setNow({ mode: 'live' })}><b>Everyone’s phones</b><span>scan to join, pick your own, host sees who owns what</span></button><p className="sb-muted sb-small">Have a join link someone sent you? Paste it:</p><input className="lv-in" aria-label="Join link" placeholder="Paste join link" value={code} onChange={(e) => { setCode(e.target.value); const l = parseLink(e.target.value); if (l) onJoin(l); }} /></section> : <>
                 {s.step === 0 && <BillStep s={s} set={set} />}
                 {s.step === 1 && mode !== 'live' && <PeopleStep s={s} set={set} />}
                 {s.step === 1 && mode === 'live' && <HostPanel s={s} host={host} setPay={(p) => set(p)} goClaim={() => set({ step: 2, gate: false, current: s.people[0]?.id ?? '' })} removePerson={(id) => set({ people: s.people.filter((p) => p.id !== id), claims: Object.fromEntries(Object.entries(s.claims).map(([k, v]) => [k, Object.fromEntries(Object.entries(v).filter(([q]) => q !== id))])), shares: Object.fromEntries(Object.entries(s.shares).map(([k, v]) => [k, v.filter((q) => q !== id)])) })} />}
                 {s.step === 2 && <ClaimStep s={s} set={set} />}
-                {s.step === 3 && <SplitStep s={s} set={set} />}
+                {s.step === 3 && <SplitStep s={s} set={set} finalize={finalize} />}
                 {s.step < 2 && !(mode === 'live' && s.step === 1) && <div className="sb-bar sb-bar-solo"><button className="sb-btn sb-block" type="button" disabled={!canNext} onClick={() => set({ step: (s.step + 1) as State['step'] })}>{label}</button></div>}
             </>}
             {meta.message && <p className="sb-muted sb-small">{meta.message}</p>}
         </div>
     </FileCard>;
-                            }
+                           }
