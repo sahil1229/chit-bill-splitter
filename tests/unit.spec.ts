@@ -42,6 +42,18 @@ test.describe('money', () => {
             expect(res.people.reduce((a, p) => a + p.total, 0)).toBe(326866);
         }
     });
+    test('6 naans eaten 2, 1 and 3 are charged by count', () => {
+        const naan = { id: 'n', name: 'Garlic Naan', qty: 6, total: 36000, everyone: false };
+        const people = [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }, { id: 'c', name: 'C' }];
+        const res = computeSplit({ items: [naan], charges: [{ id: 'g', name: 'GST', amount: 1800 }], people, claims: { n: { a: 2, b: 1, c: 3 } }, shares: {}, chargeMode: 'prorata', spread: false });
+        expect(res.people.map((p) => p.items)).toEqual([12000, 6000, 18000]);
+        expect(res.people.map((p) => p.extras)).toEqual([600, 300, 900]);
+        expect(res.people[0].lines[0].note).toBe('2 of 6');
+        const short = computeSplit({ items: [naan], charges: [], people, claims: { n: { a: 2, b: 1 } }, shares: {}, chargeMode: 'equal', spread: false });
+        expect(short.unclaimedUnits).toEqual({ n: 3 });
+        const over = computeSplit({ items: [naan], charges: [], people, claims: { n: { a: 4, b: 3 } }, shares: {}, chargeMode: 'equal', spread: false });
+        expect(over.overclaimed).toEqual(['n']);
+    });
     test('unclaimed units block until spread', () => {
         const { items, charges } = parseBill(SAMPLE);
         const people = [{ id: 'a', name: 'A' }, { id: 'b', name: 'B' }];

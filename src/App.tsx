@@ -256,6 +256,7 @@ function ClaimStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
                 const room = it.qty - (taken - n); // most units this person could hold
                 const each = Math.round(it.total / it.qty);
                 const mineShared = sharedBy.some((p) => p.id === person.id);
+                const units = it.qty > 1 && !isShared && !it.everyone; // e.g. 6 naans: 2, 1 and 3
                 const mineOn = isShared ? mineShared : n > 0;
                 const toggleShare = (pid: string) => {
                     const cur = s.shares[it.id] ?? [];
@@ -265,7 +266,7 @@ function ClaimStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
                     set({ shares: { ...s.shares, [it.id]: nextList }, claims, touched: { ...s.touched, [person.id]: true } });
                 };
                 const legacy = !isShared && claimers.length > 0;
-                const tap = () => { if (it.everyone) return; if (legacy) { setConvert(it.id); return; } toggleShare(person.id); };
+                const tap = () => { if (it.everyone) return; if (units) { setClaim(it.id, n > 0 ? 0 : Math.min(1, room)); return; } if (legacy) { setConvert(it.id); return; } toggleShare(person.id); };
                 const blocked = false;
                 const eaters = isShared ? sharedBy.length : claimers.length;
                 return <React.Fragment key={it.id}>
@@ -276,9 +277,10 @@ function ClaimStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
                         <span className="sb-tile-price">{fmt(it.total)}</span>
                         {it.everyone ? <span className="sb-tag">Everyone</span> : <span className="sb-tile-claim">
                             {(isShared ? sharedBy : claimers).map((p) => <i key={p.id} style={{ background: hue(p.id, s.people) }} title={p.name}>{p.name.slice(0, 1).toUpperCase()}</i>)}
-                            <em>{legacy ? `by units: ${claimers.map((p) => `${p.name} ${s.claims[it.id][p.id]}`).join(', ')}` : eaters === 0 ? 'nobody yet' : eaters === 1 ? 'one eater' : `${eaters} eating · ${fmt(Math.round(it.total / eaters))} each`}</em>
+                            <em>{units ? (taken ? `${claimers.map((p) => `${p.name} ${s.claims[it.id][p.id]}`).join(', ')} · ${left} of ${it.qty} left` : `${it.qty} × ${fmt(each)}, nobody yet`) : legacy ? `by units: ${claimers.map((p) => `${p.name} ${s.claims[it.id][p.id]}`).join(', ')}` : eaters === 0 ? 'nobody yet' : eaters === 1 ? 'one eater' : `${eaters} eating · ${fmt(Math.round(it.total / eaters))} each`}</em>
                         </span>}
                     </button>
+                    {units && <div className="sb-units"><span className="sb-small">{person.name} had</span><Stepper label={`${it.name} ${person.name} had`} value={n} min={0} max={room} onChange={(v) => setClaim(it.id, v)} /><span className="sb-small">of {it.qty}{n > 0 ? ` · ${fmt(Math.round(it.total * n / it.qty))}` : ''}</span></div>}
                     {!it.everyone && <button type="button" className="sb-sharebtn" aria-expanded={shareOpen === it.id} onClick={() => legacy ? setConvert(it.id) : setShareOpen(shareOpen === it.id ? null : it.id)}>Who ate this</button>}
                 </li>
                 {convert === it.id && legacy && <li className="sb-sharepanel">

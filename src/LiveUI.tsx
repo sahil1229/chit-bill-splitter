@@ -182,7 +182,17 @@ export function DinerApp({ link }: { link: Link }) {
         <ul className="lv-list">{st!.items.map((i) => {
             const mine = want[i.i] ?? 0; const shared = sh.includes(i.i); const rej = st!.rej[pid]?.[i.i];
             if (i.e) return <li key={i.i}><b>{i.n}</b><span>{fmt(i.t)} split by everyone</span></li>;
-            const eaters = new Set<string>([...i.s, ...Object.keys(i.c).filter((k) => (i.c[k] ?? 0) > 0)]); const legacy = i.s.length === 0 && eaters.size > 0; const on = shared || (legacy && mine > 0); const count = eaters.size + (on && !eaters.has(pid) ? 1 : 0);
+            const eaters = new Set<string>([...i.s, ...Object.keys(i.c).filter((k) => (i.c[k] ?? 0) > 0)]);
+            // Several of one dish (6 naans) are claimed by count; one dish is shared equally.
+            if (i.q > 1 && i.s.length === 0) {
+                const others = Object.entries(i.c).reduce((a, [k, v]) => a + (k === pid ? 0 : v), 0); const max = Math.max(0, i.q - others);
+                const set = (v: number) => push({ ...want, [i.i]: Math.max(0, Math.min(v, max)) }, sh.filter((x) => x !== i.i));
+                return <li key={i.i} className="lv-item"><b>{i.n}</b><span style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{fmt(i.t)} · {i.q} × {fmt(Math.round(i.t / i.q))}<br />{others ? `${others} taken by others · ` : ''}{i.q - others - mine} left</span>
+                    <span className="lv-step" role="group" aria-label={`How many ${i.n} you had`}><button type="button" aria-label={`Fewer ${i.n}`} disabled={mine <= 0} onClick={() => set(mine - 1)}>−</button><output aria-live="polite">{mine}</output><button type="button" aria-label={`More ${i.n}`} disabled={mine >= max} onClick={() => set(mine + 1)}>+</button></span>
+                    {mine > 0 && <small className="sb-small">You: {mine} of {i.q} · {fmt(Math.round(i.t * mine / i.q))}</small>}
+                    {rej && <em className="lv-rej">{rej}</em>}</li>;
+            }
+            const legacy = i.s.length === 0 && eaters.size > 0; const on = shared || (legacy && mine > 0); const count = eaters.size + (on && !eaters.has(pid) ? 1 : 0);
             return <li key={i.i} className="lv-item"><b>{i.n}</b><span style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{fmt(i.t)}{i.q > 1 ? ` · ${i.q} ordered` : ''}<br />{count === 0 ? 'nobody yet' : count === 1 ? 'one eater' : `${count} eating · ${fmt(Math.round(i.t / count))} each`}</span>
                 {legacy ? <em className="lv-rej">Picked by units earlier ({mine ? `you ${mine} of ${i.q}` : 'not you'}). Ask the host to switch it to equal split.</em> : <button type="button" className={`lv-share ${on ? 'on' : ''}`} aria-pressed={on} onClick={() => push({ ...want, [i.i]: 0 }, on ? sh.filter((x) => x !== i.i) : [...sh, i.i])}>{on ? 'I had this ✓' : 'I had this'}</button>}
                 {rej && <em className="lv-rej">{rej}</em>}</li>; })}</ul>

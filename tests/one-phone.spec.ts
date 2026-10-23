@@ -22,17 +22,26 @@ test('one phone: bill to frozen split, QR, pay link on the payer phone, PDF and 
     await host.getByRole('button', { name: 'Next: pass the phone' }).click();
 
     // Pass the phone round
-    const picks: Record<string, string[]> = { Asha: ['Paneer Tikka', 'Garlic Naan'], Bilal: ['Butter Chicken', 'Dal Makhani'], Chitra: ['Masala Cola', 'Gulab Jamun', 'Garlic Naan'] };
+    // Single dishes are a tap; several of one dish are counted (6 naans: Asha 2, Bilal 1, Chitra 3)
+    const picks: Record<string, [string, number][]> = { Asha: [['Paneer Tikka', 1], ['Garlic Naan', 2]], Bilal: [['Butter Chicken', 2], ['Dal Makhani', 1], ['Garlic Naan', 1]], Chitra: [['Masala Cola', 4], ['Gulab Jamun', 2], ['Garlic Naan', 3]] };
     for (const [n, ds] of Object.entries(picks)) {
         await host.getByRole('button', { name: `${n} here. Show me the food` }).click();
-        for (const d of ds) await dish(host, d).click();
+        for (const [d, count] of ds) {
+            await dish(host, d).click();
+            for (let k = 1; k < count; k++) await host.getByRole('button', { name: `More ${d} ${n} had` }).click();
+        }
+        if (n === 'Chitra') await expect(host.getByRole('button', { name: 'More Garlic Naan Chitra had' })).toBeDisabled(); // only 3 left
         await host.getByRole('button', { name: n === 'Chitra' ? 'Done, see split' : 'Done, pass on' }).click();
     }
 
-    // Split: everything assigned, totals add up to the printed bill
+    // Split: everything assigned, totals add up to the printed bill. Naan is ₹60 each.
     await expect(host.getByText('Every rupee is assigned and shares add up to the bill')).toBeVisible();
     await expect(host.locator('.sb-big')).toHaveText('₹3,268.66');
-    const amount = async (n: string) => (await host.locator('.sb-person', { hasText: n }).locator('.sb-amt').innerText());
+    const card = (n: string) => host.locator('.sb-person').filter({ has: host.locator('.sb-pn strong', { hasText: new RegExp(`^${n}$`) }) });
+    const amount = async (n: string) => (await card(n).locator('.sb-amt').innerText());
+    expect([await amount('Asha'), await amount('Bilal'), await amount('Chitra')]).toEqual(['₹736.24', '₹1,596.21', '₹936.21']) // each charge line's leftover paisa goes to the first diner;
+    await card('Chitra').locator('.sb-person-top').click();
+    await expect(card('Chitra').getByText('3 of 6')).toBeVisible();
     const bilal = await amount('Bilal');
     await expectNoHorizontalScroll(host);
 
@@ -71,7 +80,7 @@ test('one phone: bill to frozen split, QR, pay link on the payer phone, PDF and 
     await expect(bilalCard.getByText('COLLECTED')).toBeVisible();
     const wa = await host.locator('pre.sb-wa').innerText();
     expect(wa).toContain('Bilal: *' + bilal + '* ✅ received');
-    expect(wa).toMatch(/Chitra: .*\n\s+Pay: http:\/\/localhost:4175\/#pay=/);
+    expect(wa).toMatch(/Chitra: .*\n\s+Pay: https?:\/\/\S+#pay=/);
 
     // PDF downloads and is a PDF
     const [dl] = await Promise.all([host.waitForEvent('download'), host.getByRole('button', { name: 'Share the detailed PDF' }).click()]);

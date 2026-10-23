@@ -10,7 +10,7 @@ export function noProblems() { const p = problems.splice(0); expect(p).toEqual([
 
 /** A separate phone: its own context, so its own storage and keys. */
 export async function phone(browser: Browser, kind: keyof typeof PHONES = 'pixel'): Promise<Page> {
-    const ctx = await browser.newContext({ ...PHONES[kind], baseURL: 'http://localhost:4175/', permissions: ['clipboard-read', 'clipboard-write'] });
+    const ctx = await browser.newContext({ ...PHONES[kind], baseURL: process.env.CHIT_URL || 'http://localhost:4175/', permissions: ['clipboard-read', 'clipboard-write'] });
     const page = await ctx.newPage();
     page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`));
     page.on('console', (m) => { if (m.type() === 'error') problems.push(`console: ${m.text()}`); });

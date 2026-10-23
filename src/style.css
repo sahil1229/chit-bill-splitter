@@ -488,3 +488,9 @@ html, body, #root { background: #FBF7ED; }
 /* Long UPI IDs and names must wrap instead of widening cards past a 320px screen. */
 .sb-card, .lv-card, .sb-person, .ch-paybox { min-width: 0; overflow-wrap: anywhere; }
 .ch-apps a.sb-link { text-decoration: underline; text-underline-offset: 3px; font-weight: 700; }
+/* Counting units of one dish (2 of 6 naans). */
+.sb-units { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; padding: 0 4px 10px 26px; flex: 1 1 100%; order: 10; }
+.lv-step { display: inline-flex; align-items: center; gap: 6px; }
+.lv-step output { min-width: 2ch; text-align: center; font-weight: 700; font-size: 17px; }
+.lv-step button { width: 44px; font-size: 20px; }
+.lv-item small { flex: 1 1 100%; }

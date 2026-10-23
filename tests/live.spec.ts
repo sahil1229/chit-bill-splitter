@@ -156,3 +156,41 @@ test('live: closing the table before freezing tells diners', async ({ browser })
     await expect(host.getByRole('heading', { name: 'Table closed' })).toBeVisible();
     await expect(asha.getByRole('heading', { name: 'The table is closed' })).toBeVisible();
 });
+
+test('live: 6 naans eaten 2, 1 and 3 on separate phones are charged by count', async ({ browser }) => {
+    const host = await phone(browser, 'pixel');
+    await host.goto('/');
+    await host.getByRole('button', { name: /Everyone/ }).click();
+    await host.fill('#paste', '6 Garlic Naan 360.00\nTotal 360.00');
+    await host.getByRole('button', { name: 'Read items from text' }).click();
+    await host.getByRole('button', { name: 'Next: people' }).click();
+    await host.getByText('Someone else is collecting, or I am not dining').click();
+    await host.getByRole('radio', { name: 'Not dining' }).click();
+    await host.fill('#hn', 'Mom');
+    await host.getByText('Payment details (optional for now)').click();
+    await host.fill('#hupi', 'mom@oksbi');
+    await host.getByRole('button', { name: 'Open the table' }).click();
+    const url = await joinUrl(host);
+
+    const counts: [string, 'pixel' | 'iphone', number][] = [['Asha', 'pixel', 2], ['Bilal', 'iphone', 1], ['Chitra', 'pixel', 3]];
+    const phones: Record<string, Page> = {};
+    for (const [name, kind, n] of counts) {
+        const p = await phone(browser, kind); phones[name] = p; await join(p, url, name);
+        for (let k = 0; k < n; k++) await p.getByRole('button', { name: 'More Garlic Naan' }).click();
+        await saved(p);
+    }
+    // All 6 are taken: nobody can add a 7th
+    await expect(phones.Bilal.getByRole('button', { name: 'More Garlic Naan' })).toBeDisabled();
+    await expect(phones.Chitra.getByText('You: 3 of 6 · ₹180.00')).toBeVisible();
+    await expect(host.getByText('Every dish has an owner.')).toBeVisible();
+
+    await host.getByRole('button', { name: /Split$/ }).click();
+    const amt = (n: string) => host.locator('.sb-person', { hasText: n }).locator('.sb-amt');
+    await expect(amt('Asha')).toHaveText('₹120.00'); await expect(amt('Bilal')).toHaveText('₹60.00'); await expect(amt('Chitra')).toHaveText('₹180.00');
+    await host.getByRole('button', { name: 'Review final details' }).click();
+    await host.getByRole('button', { name: 'Confirm and freeze table' }).click();
+    await host.getByRole('button', { name: /Table$/ }).click();
+    await host.getByRole('button', { name: /^Approve Bilal/ }).click();
+    await phones.Bilal.getByRole('button', { name: 'I checked these details' }).click();
+    expect(upiParams((await phones.Bilal.locator('a[data-app="gpay"]').getAttribute('href'))!)).toMatchObject({ pa: 'mom@oksbi', am: '60.00' });
+});

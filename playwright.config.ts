@@ -4,6 +4,8 @@ import { defineConfig, devices } from '@playwright/test';
 // and never spend the public ntfy.sh quota (250 messages per IP per 12h).
 // CHIT_RELAY=https://ntfy.sh runs the same tests against the real public relay (spends its quota).
 const relay = process.env.CHIT_RELAY || 'http://localhost:4174';
+// CHIT_URL=https://… runs the browser journeys against a deployed site instead of a local build.
+const remote = process.env.CHIT_URL;
 
 export default defineConfig({
     testDir: 'tests',
@@ -12,8 +14,8 @@ export default defineConfig({
     fullyParallel: false,
     workers: 1,
     reporter: [['list']],
-    use: { baseURL: 'http://localhost:4175/', trace: 'retain-on-failure' },
-    webServer: [
+    use: { baseURL: remote || 'http://localhost:4175/', trace: 'retain-on-failure' },
+    webServer: remote ? [] : [
         { command: 'RELAY_PORT=4174 node tests/relay.mjs', url: 'http://localhost:4174/health', reuseExistingServer: false },
         { command: `node scripts/ocr-assets.mjs && VITE_RELAY=${relay} npx vite build --outDir dist-test --emptyOutDir --logLevel error && npx vite preview --outDir dist-test --port 4175 --strictPort`, url: 'http://localhost:4175/', reuseExistingServer: false, timeout: 120_000 },
     ],
