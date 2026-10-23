@@ -34,3 +34,5 @@ Corrections require a new table. Old UPI links already opened in another app can
 - PDF uses built-in Latin fonts. Unsupported names are explicitly blocked, not silently replaced. Real iPhone PDF sharing is untested.
 
 No real money was moved during testing. Use synthetic bills for controlled testing before relying on it at a restaurant.
+
+Parser safeguards: negative foreign-currency/decimal-comma receipts blocked; receipt qty/rate and rate/qty columns verified by arithmetic. Header before recognizable Qty/Rate table excluded, payment/identity footer lines excluded, implausibly large numbers skipped. Photo-derived text requires a detected printed total and exact parsed sum before any import. This intentionally rejects receipts with implicit rounding, illegible text or missing total; it does not guess a correction. One real INR photo parsed3items/1,1,2qty/taxes correctly but implicit40paise rounding prevented auto-import. One blurry INR photo failed closed. This is bounded repair evidence, not broad receipt accuracy.
