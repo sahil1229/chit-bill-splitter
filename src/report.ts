@@ -6,6 +6,7 @@ export type ReportInput = {
     charges: Charge[];
     people: Person[];
     collectorId: string;
+    externalCollector?: string;
     upi: string;
     received: Record<string, boolean>;
     printedTotal?: number | null;
@@ -16,8 +17,9 @@ export type ReportInput = {
 
 /** A split is final only when every rupee is assigned and the parts match the bill. */
 export function isFinal(r: ReportInput): { ok: boolean; why: string } {
+    if (r.externalCollector !== undefined && r.collectorId) return { ok: false, why: 'External collector must not be a diner.' };
     if (r.people.length === 0) return { ok: false, why: 'Add people first.' };
-    if (!r.people.some((p) => p.id === r.collectorId)) return { ok: false, why: 'Choose who is collecting the money.' };
+    if (!r.externalCollector?.trim() && !r.people.some((p) => p.id === r.collectorId)) return { ok: false, why: 'Choose who is collecting the money.' };
     if (r.res.overclaimed.length) return { ok: false, why: 'Some dishes are claimed more times than served. Fix those first.' };
     if (r.res.unassigned !== 0) return { ok: false, why: `${fmt(r.res.unassigned)} is not assigned yet. Claim it or split it equally first.` };
     if (!r.spread && Object.keys(r.res.unclaimedUnits ?? {}).length) return { ok: false, why: 'Some dishes still have unclaimed units. Claim them or mark the dish Everyone/Share first.' };
@@ -29,7 +31,7 @@ export function isFinal(r: ReportInput): { ok: boolean; why: string } {
 const statusOf = (r: ReportInput, id: string) => (id === r.collectorId ? 'collecting' : r.received[id] ? 'received' : 'waiting');
 
 export function whatsappText(r: ReportInput): string {
-    const col = r.people.find((p) => p.id === r.collectorId)!;
+    const col = r.externalCollector?.trim() ? { id: '', name: r.externalCollector.trim() } : r.people.find((p) => p.id === r.collectorId)!;
     const L: string[] = [];
     L.push(`🧾 *Dinner split* (${r.date})`);
     L.push(`Bill ${fmt(r.res.billTotal)}. ${col.name} is collecting. Everyone else sends ${col.name} their share, and ${col.name} settles with the restaurant.`);
@@ -39,8 +41,8 @@ export function whatsappText(r: ReportInput): string {
         const st = statusOf(r, p.id) === 'received' ? ' ✅ received' : '';
         L.push(`• ${p.name}: *${fmt(p.total)}*${st}`);
     }
-    const mine = r.res.people.find((p) => p.id === r.collectorId)!;
-    L.push(`• ${col.name}: ${fmt(mine.total)} (own share, collecting)`);
+    const mine = r.res.people.find((p) => p.id === r.collectorId);
+    if (mine && !r.externalCollector) L.push(`• ${col.name}: ${fmt(mine.total)} (own share, collecting)`);
     L.push('');
     const cl = r.res.chargeLines;
     const shared = r.items.filter((i) => i.everyone).map((i) => i.name);
@@ -66,7 +68,7 @@ const clean = (s: string) => norm(s);
 const OK = /^[\x20-\x7e\xa1-\xff]*$/;
 /** Text the PDF cannot draw with its built-in fonts. Export is blocked, never printed as '?'. */
 export function pdfUnsupported(r: ReportInput): string[] {
-    const all = [...r.people.map((p) => p.name), ...r.items.map((i) => i.name), ...r.charges.map((c) => c.name), r.upi];
+    const all = [...r.people.map((p) => p.name), ...r.items.map((i) => i.name), ...r.charges.map((c) => c.name), r.upi, r.externalCollector ?? ''];
     return all.filter((s) => !OK.test(norm(s)));
 }
 const esc = (s: string) => clean(s).replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
@@ -92,7 +94,7 @@ export function buildPdf(r: ReportInput): Uint8Array {
         text(s, xRight - w, yy, bold ? 'F4' : 'F3', size);
     };
     const need = (h: number) => { if (y - h < M + 30) newPage(); };
-    const col = r.people.find((p) => p.id === r.collectorId)!;
+    const col = r.externalCollector?.trim() ? { id: '', name: r.externalCollector.trim() } : r.people.find((p) => p.id === r.collectorId)!;
 
     newPage();
     text('* * *', M + 12, y - 8, 'F4', 10);
