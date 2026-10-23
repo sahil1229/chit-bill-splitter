@@ -224,7 +224,7 @@ function PeopleStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) 
 function ClaimStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
     const person = s.people.find((p) => p.id === s.current) ?? s.people[0];
     const res = useMemo(() => computeSplit(s), [s]);
-    const [shareOpen, setShareOpen] = useState<string | null>(null);
+    const [shareOpen, setShareOpen] = useState<string | null>(null); const [convert, setConvert] = useState<string | null>(null);
     if (!person) return <section className="sb-card"><p>Add people first.</p></section>;
     const idx = s.people.findIndex((p) => p.id === person.id);
     const next = s.people[idx + 1];
@@ -255,38 +255,41 @@ function ClaimStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
                 const each = Math.round(it.total / it.qty);
                 const mineShared = sharedBy.some((p) => p.id === person.id);
                 const mineOn = isShared ? mineShared : n > 0;
-                const tap = () => {
-                    if (it.everyone || isShared) return;
-                    if (room <= 0) return;
-                    if (it.qty === 1) setClaim(it.id, n ? 0 : 1); else if (n < room) setClaim(it.id, n + 1);
-                };
-                const blocked = !it.everyone && !isShared && room <= 0 && n === 0;
                 const toggleShare = (pid: string) => {
                     const cur = s.shares[it.id] ?? [];
-                    const nextList = cur.includes(pid) ? cur.filter((x) => x !== pid) : [...cur, pid];
+                    const base = cur;
+                    const nextList = base.includes(pid) ? base.filter((x) => x !== pid) : [...base, pid];
                     const claims = { ...s.claims }; delete claims[it.id];
-                    set({ shares: { ...s.shares, [it.id]: nextList }, claims: cur.length ? s.claims : claims, touched: { ...s.touched, [person.id]: true } });
+                    set({ shares: { ...s.shares, [it.id]: nextList }, claims, touched: { ...s.touched, [person.id]: true } });
                 };
+                const legacy = !isShared && claimers.length > 0;
+                const tap = () => { if (it.everyone) return; if (legacy) { setConvert(it.id); return; } toggleShare(person.id); };
+                const blocked = false;
+                const eaters = isShared ? sharedBy.length : claimers.length;
                 return <React.Fragment key={it.id}>
                 <li className={`sb-tile${mineOn ? ' is-mine' : ''}${it.everyone ? ' is-all' : ''}${blocked ? ' is-full' : ''}`}>
-                    <button type="button" className="sb-tile-main" onClick={tap} disabled={it.everyone || isShared || blocked} aria-label={`${it.name}, ${fmt(it.total)}. ${it.everyone ? 'Split by everyone.' : isShared ? `Shared by ${sharedBy.map((p) => p.name).join(', ')}.` : blocked ? 'All units taken.' : `${person.name} has ${n} of ${it.qty}. Tap to add.`}`}>
+                    <button type="button" className="sb-tile-main" onClick={tap} disabled={it.everyone} aria-label={`${it.name}, ${fmt(it.total)}. ${it.everyone ? 'Split by everyone.' : mineOn ? 'You had this. Tap to undo.' : 'Tap if you had this.'}`}>
                         <span className="ch-box" aria-hidden>{it.everyone ? "◆" : mineOn ? "☑" : "☐"}</span>
-                        <span className="sb-tile-name">{it.name || 'Item'}{it.qty > 1 ? ` ×${it.qty}` : ''}</span><span className="ch-lead" aria-hidden />
+                        <span className="sb-tile-name">{it.name || 'Item'}{it.qty > 1 ? ` · ${it.qty} ordered` : ''}</span><span className="ch-lead" aria-hidden />
                         <span className="sb-tile-price">{fmt(it.total)}</span>
                         {it.everyone ? <span className="sb-tag">Everyone</span> : <span className="sb-tile-claim">
-                            {isShared ? <><span className="sb-tag sb-tag-s">Shared</span>{sharedBy.map((p) => <i key={p.id} style={{ background: hue(p.id, s.people) }} title={p.name}>{p.name.slice(0, 1).toUpperCase()}</i>)}</>
-                                : <>{claimers.map((p) => <i key={p.id} style={{ background: hue(p.id, s.people) }} title={p.name}>{p.name.slice(0, 1).toUpperCase()}{it.qty > 1 ? <b>{s.claims[it.id][p.id]}</b> : null}</i>)}
-                                {left > 0 && (taken > 0 || it.qty > 1) && <em>{left} left</em>}
-                                {blocked && <em>all taken</em>}</>}
+                            {(isShared ? sharedBy : claimers).map((p) => <i key={p.id} style={{ background: hue(p.id, s.people) }} title={p.name}>{p.name.slice(0, 1).toUpperCase()}</i>)}
+                            <em>{legacy ? `by units: ${claimers.map((p) => `${p.name} ${s.claims[it.id][p.id]}`).join(', ')}` : eaters === 0 ? 'nobody yet' : eaters === 1 ? 'one eater' : `${eaters} eating · ${fmt(Math.round(it.total / eaters))} each`}</em>
                         </span>}
                     </button>
-                    {mineOn && !isShared && it.qty > 1 && <span className="ch-mine">yours ×{n}</span>}
-                    {!isShared && n > 0 && it.qty > 1 && <button type="button" className="sb-minus" aria-label={`One less ${it.name}`} onClick={() => setClaim(it.id, n - 1)}>−</button>}
-                    {!it.everyone && <button type="button" className="sb-sharebtn" aria-expanded={shareOpen === it.id} onClick={() => setShareOpen(shareOpen === it.id ? null : it.id)}>{isShared ? 'Edit share' : 'Share'}</button>}
+                    {!it.everyone && <button type="button" className="sb-sharebtn" aria-expanded={shareOpen === it.id} onClick={() => legacy ? setConvert(it.id) : setShareOpen(shareOpen === it.id ? null : it.id)}>Who ate this</button>}
                 </li>
+                {convert === it.id && legacy && <li className="sb-sharepanel">
+                    <strong>{it.name} was picked by units</strong>
+                    <span className="sb-small">{claimers.map((p) => `${p.name} ${s.claims[it.id][p.id]} of ${it.qty} (about ${fmt(Math.round(it.total * s.claims[it.id][p.id] / it.qty))})`).join(', ')}. Switching splits the whole ₹{(it.total / 100).toFixed(2)} equally between {claimers.map((p) => p.name).join(', ')}, which changes what each person owes. Nothing changes unless you confirm.</span>
+                    <div className="sb-row-btns">
+                        <button type="button" className="sb-btn sb-ghost" onClick={() => setConvert(null)}>Keep units</button>
+                        <button type="button" className="sb-btn" onClick={() => { const claims = { ...s.claims }; delete claims[it.id]; set({ shares: { ...s.shares, [it.id]: claimers.map((p) => p.id) }, claims, touched: { ...s.touched, [person.id]: true } }); setConvert(null); }}>Switch to equal split</button>
+                    </div>
+                </li>}
                 {shareOpen === it.id && <li className="sb-sharepanel">
-                    <strong>Who shared {it.name}?</strong>
-                    <span className="sb-small">It is split equally between the people you pick. {claimers.length > 0 && !isShared ? 'This replaces the unit counts for this dish.' : ''}</span>
+                    <strong>Who ate {it.name}?</strong>
+                    <span className="sb-small">The whole price is split equally between the people you pick, however many were ordered.</span>
                     <div className="sb-pills" role="group" aria-label="People sharing">
                         {s.people.map((p) => <button key={p.id} type="button" aria-pressed={sharedBy.some((x) => x.id === p.id)} className="sb-pill" style={{ ['--c' as string]: hue(p.id, s.people) }} onClick={() => toggleShare(p.id)}>{p.name}</button>)}
                     </div>
@@ -488,4 +491,4 @@ function Host({ onJoin }: { onJoin: (l: NonNullable<ReturnType<typeof envLink>>)
             {meta.message && <p className="sb-warn" role="alert">{meta.message}</p>}
         </div>
     </FileCard>;
-                                                                                                                                                                                  }
+                    }
