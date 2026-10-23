@@ -103,7 +103,8 @@ test('one phone: bill to frozen split, payment links to the group and to one pay
 
     // New bill starts clean
     await host.getByRole('button', { name: 'New bill' }).click();
-    await host.getByRole('button', { name: 'Old links stay valid. Start new?' }).click();
+    await expect(host.getByRole('dialog', { name: 'Start a new bill' })).toContainText('Everyone keeps their payment link');
+    await host.getByRole('button', { name: 'Start new' }).click();
     await expect(host.getByRole('button', { name: /One phone/ })).toBeVisible();
 });
 

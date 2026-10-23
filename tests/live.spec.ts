@@ -318,3 +318,38 @@ test('smooth: a single tap is confirmed by the host within about a second', asyn
     expect(Date.now() - t0).toBeLessThan(1500);
     await expect(a.locator('.lv-total.is-updating')).toHaveCount(0);
 });
+
+test('new bill: starts at once even on a slow relay; open table closes for diners, frozen one stays payable', async ({ browser, request }) => {
+    test.skip(!!process.env.CHIT_URL, 'needs the local relay to simulate a slow relay');
+    // Open (not frozen) table
+    const host = await phone(browser, 'pixel');
+    await hostBill(host, 'Masala Dosa 180.00\nTotal 180.00');
+    let url = await openTable(host, 'Mom', 'mom@oksbi', false);
+    const a = await phone(browser, 'pixel'); await join(a, url, 'Asha');
+    await host.getByRole('button', { name: 'New bill' }).click();
+    await host.getByRole('button', { name: 'Cancel' }).click();
+    await expect(host.getByRole('heading', { name: 'Scan to join' })).toBeVisible(); // cancel keeps the table
+    await request.post('http://localhost:4174/__limit?n=3'); // relay refuses the next messages
+    await host.getByRole('button', { name: 'New bill' }).click();
+    const t0 = Date.now();
+    await host.getByRole('button', { name: 'Start new' }).click();
+    await expect(host.getByRole('button', { name: /One phone/ })).toBeVisible({ timeout: 2000 });
+    expect(Date.now() - t0).toBeLessThan(2000);
+    await expect(a.getByRole('heading', { name: 'The table is closed' })).toBeVisible({ timeout: 40_000 });
+
+    // Frozen table: diners keep their payment after the host starts a new bill
+    await hostBill(host, 'Masala Dosa 180.00\nTotal 180.00');
+    url = await openTable(host, 'Mom', 'mom@oksbi', false);
+    const b = await phone(browser, 'pixel'); await join(b, url, 'Bilal');
+    await pick(b, 'Masala Dosa'); await saved(b);
+    await freeze(host);
+    await expect(b.locator('a[data-app="gpay"]')).toHaveText('Pay ₹180.00 in Google Pay');
+    await host.getByRole('button', { name: 'New bill' }).click();
+    await host.getByRole('button', { name: 'Start new' }).click();
+    await expect(host.getByRole('button', { name: /One phone/ })).toBeVisible();
+    await b.waitForTimeout(3000);
+    await expect(b.locator('a[data-app="gpay"]')).toHaveText('Pay ₹180.00 in Google Pay');
+    await b.reload(); // even after a reload, the frozen bill comes back from the relay
+    await expect(b.locator('a[data-app="gpay"]')).toHaveText('Pay ₹180.00 in Google Pay');
+    problems.splice(0, problems.length, ...problems.filter((p) => !p.includes('status of 429')));
+});

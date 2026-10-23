@@ -497,16 +497,33 @@ function Host({ onJoin }: { onJoin: (l: NonNullable<ReturnType<typeof envLink>>)
         try { const settlement = await journalForOperation.finalize(draft); if (journal.current !== journalForOperation || sRef.current.tableId !== tableForOperation) throw Error('Table changed during finalization. Saved instructions were not applied to another table.'); const next = { ...sRef.current, settlement }; sRef.current = next; setSaved(next); }
         catch(e) { if (!journal.current.locked) finalizing.current = false; if (journal.current.locked) setJournalError('Finalization could not be confirmed. This table is blocked. Reload to reconcile saved details; do not pay from this screen.'); throw e; }
     };
+    const startNew = () => {
+        if (finalizing.current && !s.settlement) { setJournalError('Finalization is unresolved. Reload to reconcile before starting another table.'); setSure(false); return; }
+        setSure(false);
+        // A frozen table stays live on diners' phones so they can still pay. An open one is told it closed,
+        // in the background: the new bill never waits on the relay.
+        if (host.sess && !host.sess.closed && !s.settlement) void host.close(true).catch(() => {});
+        host.reset();
+        const next = { ...EMPTY, tableId: crypto.randomUUID() };
+        journal.current = new SettlementJournal(next.tableId, localStorage);
+        sRef.current = next; setSaved(next); setJournalError(''); finalizing.current = false;
+        void journal.current.recover().then(() => setJournalReady(true), (e) => setJournalError('Saved table storage could not be read. ' + String((e as Error).message)));
+    };
     const canNext = s.step === 0 ? s.items.length > 0 : s.step === 1 ? s.people.length > 0 : true;
     const label = s.step === 0 ? 'Next: people' : 'Next: pass the phone';
     return <FileCard>
         <div className="sb-app" ref={top}>
             <header className="sb-top">
-                <div className="sb-title"><div className="ch-mark"><span className="ch-stars">* * *</span><h1>CHIT</h1><span className="ch-tag">THE BILL, SPLIT FAIR &amp; SQUARE</span></div>{s.items.length > 0 && <button className="sb-link" type="button" onClick={() => { if (sure) { if (finalizing.current && !s.settlement) { setJournalError('Finalization is unresolved. Reload to reconcile before starting another table.'); return; } setSure(false); void (async () => { if (host.sess && !host.sess.closed) await host.close(true); host.reset(); const next = { ...EMPTY, tableId: crypto.randomUUID() }; journal.current = new SettlementJournal(next.tableId, localStorage); await journal.current.recover(); sRef.current = next; setSaved(next); setJournalError(''); finalizing.current = false; setJournalReady(true); })(); } else { setSure(true); setTimeout(() => setSure(false), 4000); } }}>{sure ? (s.settlement ? 'Old links stay valid. Start new?' : 'Tap again to clear') : 'New bill'}</button>}</div>
+                <div className="sb-title"><div className="ch-mark"><span className="ch-stars">* * *</span><h1>CHIT</h1><span className="ch-tag">THE BILL, SPLIT FAIR &amp; SQUARE</span></div>{s.items.length > 0 && !sure && <button className="sb-link" type="button" onClick={() => setSure(true)}>New bill</button>}</div>
                 <ol className="sb-steps" aria-label="Steps">
                     {STEPS.map((t0, i) => { const t = mode === 'live' && i === 1 ? 'Table' : t0; return <li key={t}><button type="button" aria-current={s.step === i ? 'step' : undefined} disabled={(!!s.settlement && i !== 3 && !(mode === 'live' && i === 1)) || (i > 0 && !s.items.length) || (i > 1 && !s.people.length)} onClick={() => set({ step: i as State['step'] })}><span>{i + 1}</span>{t}</button></li>; })}
                 </ol>
             </header>
+            {sure && <section className="sb-card ch-next" data-next="newbill" role="dialog" aria-label="Start a new bill">
+                <h2>Start a new bill?</h2>
+                <p>{s.settlement ? 'Everyone keeps their payment link for this bill, so they can still pay you.' : mode === 'live' && host.sess && !host.sess.closed ? 'This clears the current bill and closes the table for everyone who joined.' : 'This clears the current bill.'}</p>
+                <div className="ch-apps"><button type="button" className="sb-btn sb-small-btn" onClick={startNew}>Start new</button><button type="button" className="sb-btn sb-ghost sb-small-btn" onClick={() => setSure(false)}>Cancel</button></div>
+            </section>}
             <div className="ch-perf" aria-hidden>- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -</div>
             {editNotice && <p className="sb-warn" role="status">{editNotice}</p>}
             {journalError && <p className="sb-warn" role="alert">{journalError}</p>}
