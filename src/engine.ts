@@ -75,11 +75,24 @@ export function parseBill(text: string): Parsed {
             continue;
         }
         if (CHARGE_RE.test(name) && !/^\d+\s*[x×]?\s/.test(name)) {
-            charges.push({ id: uid('c'), name: name.replace(/\s+/g, ' '), amount });
+            const disc = /\b(discount|coupon|promo|offer|saving|savings)\b/i.test(name) && amount > 0;
+            charges.push({ id: uid('c'), name: name.replace(/\s+/g, ' ').replace(/[@:]+$/, '').trim(), amount: disc ? -amount : amount });
+            if (disc) skipped.push(`CHECK: "${raw.trim()}" has no minus sign. Read as a discount of ${(amount / 100).toFixed(2)}. Fix it if that is wrong.`);
             continue;
         }
         if (SKIP_RE.test(name)) { skipped.push(raw.trim()); continue; }
+        let warn = '';
+        if (/\b(discount|coupon|promo|offer|saving|savings)\b/i.test(name) && amount > 0) { charges.push({ id: uid('c'), name: name.replace(/\s+/g, ' ').replace(/[@:\-]+$/, '').trim(), amount: -amount }); skipped.push(`CHECK: "${raw.trim()}" has no minus sign. Read as a discount of ${(amount / 100).toFixed(2)}. Fix it if that is wrong.`); continue; }
         let qty = nums.length >= 2 && /^\d{1,2}$/.test(nums[0]) && parseInt(nums[0], 10) > 0 ? parseInt(nums[0], 10) : 1; // qty column, e.g. "Naan 6 360.00"
+        if (nums.length >= 3) { // rate qty total, e.g. "Naan 60.00 6 360.00"
+            const rate = toMinor(nums[nums.length - 3]); const qn = /^\d{1,3}$/.test(nums[nums.length - 2]) ? parseInt(nums[nums.length - 2], 10) : 0;
+            if (rate !== null && qn > 0 && rate * qn === amount) qty = qn;
+            else warn = `${nums.join(' ')}`;
+        }
+        // trailing "2 x", "3 @", or "x" left in the name by the number split
+        const tq = name.match(/^(.*?)\s+(\d{1,3})\s*[xX×@]$/);
+        if (tq) { name = tq[1]; qty = Math.max(1, parseInt(tq[2], 10)); warn = warn || `${qty} x ${(amount / 100).toFixed(2)}`; }
+        else if (/\s[xX×@]$/.test(name)) name = name.replace(/\s*[xX×@]$/, '');
         const q = name.match(/^(\d{1,3})\s*(?:[xX×]\s*|\s+)(.+)$/);
         if (q) { qty = Math.max(1, parseInt(q[1], 10)); name = q[2]; }
         else {
@@ -87,6 +100,7 @@ export function parseBill(text: string): Parsed {
             if (q2) { name = q2[1]; qty = Math.max(1, parseInt(q2[2], 10)); }
         }
         items.push({ id: uid('i'), name: name.trim(), qty, total: amount, everyone: WATER_RE.test(name) });
+        if (warn) skipped.push(`CHECK: "${raw.trim()}" was read as ${qty} unit${qty > 1 ? 's' : ''}, ${(amount / 100).toFixed(2)} in total. If ${(amount / 100).toFixed(2)} is the price each, fix the total.`);
     }
     return { items, charges, printedTotal, skipped };
 }
