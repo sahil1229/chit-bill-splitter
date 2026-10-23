@@ -472,3 +472,9 @@ html, body, #root { background: #FBF7ED; }
 .sb-amt { flex: 0 0 auto; max-width: 100%; }
 .sb-ok { color: #1C1917; background: transparent; border: 1px dashed #8d836f; }
 .ch-owes { font: inherit; color: #4a443d; font-size: 13px; }
+
+/* Keep navigation in flow: it must not cover photo help or review fields. */
+.sb-bar { position: static !important; }
+.lv-collect label { display: grid; gap: 5px; margin: 8px 0; }
+.lv-collect input { box-sizing: border-box; width: 100%; min-width: 0; min-height: 44px; font: inherit; padding: 8px; }
+.sb-note { background: #fffdf5 !important; border: 1px dashed #1C1917 !important; color: #1C1917 !important; }
