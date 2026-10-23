@@ -18,7 +18,7 @@ type State = {
     spread: boolean;
     collectorId: string;
     upi: string;
-    received: Record<string, boolean>;
+    received: Record<string, string | number | boolean>;
     current: string;
     touched: Record<string, boolean>;
     gate: boolean;
@@ -81,7 +81,7 @@ function BillStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
         const r = parseBill(text);
         if (!r.items.length) { setNote('Could not find any dishes with prices in that text. Add them by hand below.'); return; }
         set({ items: r.items, charges: r.charges, printedTotal: r.printedTotal, claims: {}, shares: {}, touched: {} });
-        setNote(`Read ${r.items.length} items and ${r.charges.length} charges${r.skipped.length ? `. Ignored ${r.skipped.length} lines` : ''}. Check them against the bill.`);
+        setNote(`Read ${r.items.length} items and ${r.charges.length} charges${r.skipped.filter((x) => !x.startsWith('CHECK:')).length ? `. Ignored ${r.skipped.filter((x) => !x.startsWith('CHECK:')).length} lines` : ''}. Check them against the bill.${r.skipped.filter((x) => x.startsWith('CHECK:')).length ? ' ' + r.skipped.filter((x) => x.startsWith('CHECK:')).join(' ') : ''}`);
     };
     const itemsTotal = s.items.reduce((a, b) => a + b.total, 0);
     const chargesTotal = s.charges.reduce((a, b) => a + b.amount, 0);
@@ -189,10 +189,11 @@ function PeopleStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) 
             <h2>Who is collecting the money?</h2><p className="ch-note">Everyone pays this one person. They settle with the restaurant. Nobody has to be a hero twice.</p>
             <p className="sb-muted">Everyone else pays this person. They settle with the restaurant.</p>
             <div className="sb-pills" role="radiogroup" aria-label="Collector">
-                {s.people.map((p) => <button key={p.id} type="button" role="radio" aria-checked={s.collectorId === p.id} className="sb-pill" onClick={() => set(s.collectorId === p.id ? {} : { collectorId: p.id, upi: '', received: {} })}>{p.name}</button>)}
+                {s.people.map((p) => <button key={p.id} type="button" role="radio" aria-checked={s.collectorId === p.id} className="sb-pill" onClick={() => set(s.collectorId === p.id ? {} : { collectorId: p.id, upi: '', received: {} })}>{p.name}{s.people.filter((q) => q.name.trim().toLowerCase() === p.name.trim().toLowerCase()).length > 1 ? ` (#${s.people.filter((q) => q.name.trim().toLowerCase() === p.name.trim().toLowerCase()).findIndex((q) => q.id === p.id) + 1})` : ''}</button>)}
             </div>
             <label className="sb-label" htmlFor="upi">UPI ID of the collector (optional)</label>
             <input id="upi" className="sb-input" inputMode="email" autoCapitalize="none" autoCorrect="off" placeholder="name@bank" value={s.upi} onChange={(e) => set({ upi: e.target.value })} />
+            {s.upi.trim() && !validUpi(s.upi) && <p className="sb-warn">That does not look like a UPI ID (name@bank). No pay buttons will show until it does.</p>}
             <p className="sb-small sb-muted">Only used to make Pay buttons. Stays on this device. Nothing is paid from here. The buttons try to open your UPI app with the amount filled in. That may not work on every phone or app, so check the ID and amount there, or use Copy. Opening an app does not mean it was paid.</p>
         </section>}
     </>;
@@ -292,7 +293,9 @@ function SplitStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
     const unclaimedList = s.items.filter((i) => !i.everyone && (res.unclaimedUnits[i.id] ?? 0) > 0);
     const payers = res.people.filter((p) => p.id !== s.collectorId);
     const owed = payers.reduce((a, b) => a + b.total, 0);
-    const back = payers.filter((p) => s.received[p.id]).reduce((a, b) => a + b.total, 0);
+    const rk = (n: number) => `${n}|${s.collectorId}|${s.upi.trim().toLowerCase()}`;
+    useEffect(() => { const bad = Object.keys(s.received).filter((id) => s.received[id] && (id === s.collectorId || s.received[id] !== rk(res.people.find((p) => p.id === id)?.total ?? -1))); if (bad.length) set({ received: Object.fromEntries(Object.entries(s.received).filter(([id]) => !bad.includes(id))) }); }, [s.received, s.collectorId, s.upi, res]);
+    const back = payers.filter((p) => s.received[p.id] === rk(p.total)).reduce((a, b) => a + b.total, 0);
     const pct = owed ? Math.round((back / owed) * 100) : 0;
     const upiLink = (amt: number) => `upi://pay?pa=${encodeURIComponent(s.upi.trim())}&pn=${encodeURIComponent(collector?.name ?? '')}&am=${(amt / 100).toFixed(2)}&cu=INR&tn=${encodeURIComponent('Dinner split')}`;
     const share = async (text: string, okMsg: string) => {
@@ -302,7 +305,7 @@ function SplitStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
         } catch { setMsg('Sharing was cancelled. Nothing was sent.'); }
     };
     const request = (p: { name: string; total: number }) => share(`Hi ${p.name}, your share of dinner is ${fmt(p.total)}.${s.upi.trim() ? ` Pay ${collector?.name} on UPI: ${s.upi.trim()}` : ` Please pay ${collector?.name ?? 'me'}.`}`, `Request for ${p.name} opened in the share sheet. That is a request, not a payment.`);
-    const rep: ReportInput = { res, items: s.items, charges: s.charges, people: s.people, collectorId: s.collectorId, upi: s.upi, received: s.received, chargeMode: s.chargeMode, spread: s.spread, date: new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) };
+    const rep: ReportInput = { printedTotal: s.printedTotal, res, items: s.items, charges: s.charges, people: s.people, collectorId: s.collectorId, upi: s.upi, received: Object.fromEntries(payers.filter((p) => s.received[p.id] === rk(p.total)).map((p) => [p.id, true])), chargeMode: s.chargeMode, spread: s.spread, date: new Date().toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) };
     const fin = isFinal(rep);
     const waText = fin.ok ? whatsappText(rep) : '';
     const bad = pdfUnsupported(rep);
@@ -310,7 +313,7 @@ function SplitStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
     const sharePdf = async () => {
         if (!isFinal(rep).ok) { setMsg('Not final yet, so no PDF was made.'); return; }
         if (bad.length) { setMsg(`PDF not made: these names use characters the PDF cannot print: ${bad.join(', ')}. Rename them with plain letters, or share the message instead.`); return; }
-        const file = new File([buildPdf(rep)], 'dinner-split.pdf', { type: 'application/pdf' });
+        const file = new File([buildPdf(rep) as BlobPart], 'dinner-split.pdf', { type: 'application/pdf' });
         try {
             if (navigator.canShare?.({ files: [file] })) { await navigator.share({ files: [file], title: 'Dinner split' }); setMsg('PDF opened in the share sheet. Pick your group. Nothing was sent yet.'); return; }
         } catch (e) { if ((e as Error).name === 'AbortError') { setMsg('Sharing was cancelled. Nothing was sent.'); return; } }
@@ -347,11 +350,11 @@ function SplitStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
             {res.people.map((p) => {
                 const isCollector = p.id === s.collectorId;
                 const person = s.people.find((x) => x.id === p.id)!;
-                const done = !!s.received[p.id];
+                const done = s.received[p.id] === rk(p.total); const stale = !done && !!s.received[p.id];
                 return <li key={p.id} className={`sb-person${done ? ' is-paid' : ''}`} style={{ ['--who' as string]: hue(p.id, s.people) }}>
                     <button type="button" className="sb-person-top" aria-expanded={open === p.id} onClick={() => setOpen(open === p.id ? null : p.id)}>
                         <Avatar p={person} people={s.people} />
-                        <span className="sb-pn"><strong>{p.name}</strong><span className="sb-muted sb-small">{isCollector ? 'Collecting the money' : done ? 'Marked as received' : `Owes ${collector?.name ?? ''}`}</span></span>
+                        <span className="sb-pn"><strong>{p.name}</strong><span className="sb-muted sb-small">{isCollector ? 'Collecting the money' : done ? 'Marked as received' : stale ? `Amount or payee changed after you ticked it. Owes ${collector?.name ?? ''}` : `Owes ${collector?.name ?? ''}`}</span></span>
                         <strong className="sb-amt">{fmt(p.total)}</strong>
                     </button>
                     {done && !isCollector && <span className="ch-stamp" aria-label="Marked collected by hand">COLLECTED</span>}
@@ -362,8 +365,8 @@ function SplitStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
                         <div className="sb-bl sb-sum"><span>Total</span><span>{fmt(p.total)}</span></div>
                     </div>}
                     {!isCollector && <div className="sb-pay">
-                        {!fin.ok ? <p className="sb-small sb-muted">Amount not final yet.</p> : validUpi(s.upi) ? <span className="ch-pay"><a className="sb-btn sb-small-btn sb-a" href={upiLink(p.total).replace('upi://', 'gpay://upi/')}>Open Google Pay · {fmt(p.total)}</a><a className="sb-link" href={upiLink(p.total)}>Other UPI app</a><button type="button" className="sb-link" onClick={async () => { try { await navigator.clipboard.writeText(`${s.upi.trim()} ${(p.total / 100).toFixed(2)}`); setMsg('Copied UPI ID and amount. Paste them into any UPI app.'); } catch { setMsg(`UPI ID ${s.upi.trim()}, amount ${(p.total / 100).toFixed(2)}`); } }}>Copy ID + amount</button></span> : <button type="button" className="sb-btn sb-small-btn" onClick={() => request(p)}>Request {fmt(p.total)}</button>}
-                        <button type="button" role="switch" aria-checked={done} className={`sb-got${done ? ' on' : ''}`} onClick={() => set({ received: { ...s.received, [p.id]: !done } })}>{done ? '✓ Received' : 'Mark received'}</button>
+                        {!fin.ok ? <p className="sb-small sb-muted">Amount not final yet.</p> : done ? <p className="sb-small sb-muted">Received. Nothing more to pay.</p> : validUpi(s.upi) ? <span className="ch-pay"><a className="sb-btn sb-small-btn sb-a" href={upiLink(p.total).replace('upi://', 'gpay://upi/')}>Open Google Pay · {fmt(p.total)}</a><a className="sb-link" href={upiLink(p.total)}>Other UPI app</a><button type="button" className="sb-link" onClick={async () => { try { await navigator.clipboard.writeText(`${s.upi.trim()} ${(p.total / 100).toFixed(2)}`); setMsg('Copied UPI ID and amount. Paste them into any UPI app.'); } catch { setMsg(`UPI ID ${s.upi.trim()}, amount ${(p.total / 100).toFixed(2)}`); } }}>Copy ID + amount</button></span> : <button type="button" className="sb-btn sb-small-btn" onClick={() => request(p)}>Request {fmt(p.total)}</button>}
+                        <button type="button" role="switch" aria-checked={done} className={`sb-got${done ? ' on' : ''}`} onClick={() => set({ received: { ...s.received, [p.id]: done ? 0 : rk(p.total) } })}>{done ? '✓ Received' : 'Mark received'}</button>
                     </div>}
                 </li>;
             })}
@@ -398,10 +401,11 @@ function Host({ onJoin }: { onJoin: (l: NonNullable<ReturnType<typeof envLink>>)
     const [saved, setSaved, meta] = useLocalState<State>('split.v1', EMPTY);
     const s: State = { ...EMPTY, ...saved };
     const sRef = useRef(s); sRef.current = s;
-    const setNow = (p: Partial<State>) => { const next = { ...sRef.current, ...p }; sRef.current = next; setSaved(next); };
+    const SETTLE = ['items', 'charges', 'people', 'claims', 'shares', 'chargeMode', 'spread', 'collectorId', 'upi', 'printedTotal', 'hostName'] as const;
+    const setNow = (p: Partial<State>) => { const cur: any = sRef.current; const changed = SETTLE.some((k) => k in p && JSON.stringify((p as any)[k]) !== JSON.stringify(cur[k])); const next = { ...sRef.current, ...(changed && !('received' in p) ? { received: {} } : {}), ...p }; sRef.current = next; setSaved(next); };
     const set = (p: Partial<State>) => { if (meta.ready) setNow({ ...(p.step === 2 && p.gate === undefined ? { gate: true, current: s.people[0]?.id ?? s.current } : {}), ...p }); };
     const mode = s.mode ?? (s.items.length ? 'one' : 'pick');
-    const version = JSON.stringify([s.items.map((i) => i.id + '|' + i.name + '|' + i.qty + '|' + i.total + '|' + (i.everyone ? 1 : 0)), s.people, s.claims, s.shares, s.charges, s.chargeMode, s.upi ?? '', s.hostName ?? '']);
+    const version = JSON.stringify([s.items.map((i) => i.id + '|' + i.name + '|' + i.qty + '|' + i.total + '|' + (i.everyone ? 1 : 0)), s.people, s.claims, s.shares, s.charges, s.chargeMode, s.upi ?? '', s.hostName ?? '', s.printedTotal]);
     const host = useHost(() => sRef.current, (p) => { if (meta.ready) setNow(p as Partial<State>); }, version, meta.ready, { get: () => sRef.current.hostSess, set: (v) => { if (meta.ready) setNow({ hostSess: v }); } });
     const [code, setCode] = useState('');
     const top = useRef<HTMLDivElement>(null);
@@ -412,7 +416,7 @@ function Host({ onJoin }: { onJoin: (l: NonNullable<ReturnType<typeof envLink>>)
     return <FileCard>
         <div className="sb-app" ref={top}>
             <header className="sb-top">
-                <div className="sb-title"><div className="ch-mark"><span className="ch-stars">* * *</span><h1>CHIT</h1><span className="ch-tag">THE BILL, SPLIT FAIR &amp; SQUARE</span></div>{s.items.length > 0 && <button className="sb-link" type="button" onClick={() => { if (sure) { setSaved(EMPTY); setSure(false); } else { setSure(true); setTimeout(() => setSure(false), 4000); } }}>{sure ? 'Tap again to clear' : 'New bill'}</button>}</div>
+                <div className="sb-title"><div className="ch-mark"><span className="ch-stars">* * *</span><h1>CHIT</h1><span className="ch-tag">THE BILL, SPLIT FAIR &amp; SQUARE</span></div>{s.items.length > 0 && <button className="sb-link" type="button" onClick={() => { if (sure) { setSure(false); void (async () => { if (host.sess && !host.sess.closed) await host.close(); host.reset(); sRef.current = EMPTY; setSaved(EMPTY); })(); } else { setSure(true); setTimeout(() => setSure(false), 4000); } }}>{sure ? 'Tap again to clear' : 'New bill'}</button>}</div>
                 <ol className="sb-steps" aria-label="Steps">
                     {STEPS.map((t0, i) => { const t = mode === 'live' && i === 1 ? 'Table' : t0; return <li key={t}><button type="button" aria-current={s.step === i ? 'step' : undefined} disabled={(i > 0 && !s.items.length) || (i > 1 && !s.people.length)} onClick={() => set({ step: i as State['step'] })}><span>{i + 1}</span>{t}</button></li>; })}
                 </ol>
@@ -429,4 +433,4 @@ function Host({ onJoin }: { onJoin: (l: NonNullable<ReturnType<typeof envLink>>)
             {meta.message && <p className="sb-muted sb-small">{meta.message}</p>}
         </div>
     </FileCard>;
-}
+                            }
