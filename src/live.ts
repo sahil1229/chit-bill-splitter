@@ -97,7 +97,7 @@ export function subscribe(topic: string, onMsg: (body: string) => void, onStatus
 // ---- state published by the host ----
 export type LiveItem = { i: string; n: string; q: number; t: number; e?: 1; c: Record<string, number>; s: string[] };
 export const validUpi = (u?: string) => /^[a-zA-Z0-9._-]{2,64}@[a-zA-Z][a-zA-Z0-9]{1,30}$/.test((u ?? '').trim());
-export type LiveState = { rev: number; open: boolean; final: boolean; items: LiveItem[]; pay?: { n: string; u: string }; people: { i: string; n: string }[]; tot: Record<string, number>; ack: Record<string, number>; rej: Record<string, Record<string, string>>; at: number; settlement?: Settlement };
+export type LiveState = { rev: number; open: boolean; final: boolean; items: LiveItem[]; pay?: { n: string; u: string }; people: { i: string; n: string }[]; tot: Record<string, number>; ack: Record<string, number>; rej: Record<string, Record<string, string>>; at: number; settlement?: Settlement; approved?: string[] };
 const CHUNK = 2200;
 export function chunkState(st: LiveState): object[] {
     const s = JSON.stringify(st); const parts: string[] = [];
@@ -117,7 +117,7 @@ export class Reassembler {
 }
 
 // ---- host authority ----
-export type Snap = { items: Item[]; charges: Charge[]; people: Person[]; claims: Claims; shares: Shares; chargeMode: ChargeMode; spread: boolean; upi?: string; hostName?: string; printedTotal?: number | null; settlement?: Settlement; externalCollector?: string; tableId?: string; frozen?: boolean };
+export type Snap = { items: Item[]; charges: Charge[]; people: Person[]; claims: Claims; shares: Shares; chargeMode: ChargeMode; spread: boolean; upi?: string; hostName?: string; printedTotal?: number | null; settlement?: Settlement; externalCollector?: string; tableId?: string; frozen?: boolean; approved?: string[] };
 const cleanName = (s: unknown) => String(s ?? '').replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, 24);
 
 export class HostEngine {
@@ -187,7 +187,7 @@ export class HostEngine {
         return {
             rev: ++this.rev, open: this.open, final: (s.printedTotal == null || s.printedTotal === res.billTotal) && res.reconciles && res.unassigned === 0 && Object.keys(res.unclaimedUnits).length === 0 && s.people.length > 0, at: Date.now(),
             items: s.items.map((it) => ({ i: it.id, n: it.name.slice(0, 40), q: it.qty, t: it.total, ...(it.everyone ? { e: 1 as const } : {}), c: s.claims[it.id] ?? {}, s: s.shares[it.id] ?? [] })),
-            ...(s.settlement ? { settlement: s.settlement } : {}),
+            ...(s.settlement ? { settlement: s.settlement, approved: (s.approved ?? []).filter((id) => ids.has(id)) } : {}),
             // Live payment links disabled until immutable settlement confirmation is supported.
             people: s.people.map((p) => ({ i: p.id, n: p.name })), tot,
             ack: Object.fromEntries(Object.entries(this.ack).filter(([k]) => ids.has(k))), rej: Object.fromEntries(Object.entries(this.rej).filter(([k]) => ids.has(k))),
