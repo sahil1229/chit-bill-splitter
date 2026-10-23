@@ -31,12 +31,26 @@ export async function newSession(): Promise<{ link: Link; host: Awaited<ReturnTy
     return { link: { topic: 'sb' + rndId(10), key: rnd(16), hostPub: host.pub }, host };
 }
 
-/** Envelope: iv + AES-GCM({p: payload JSON string, s: signature}) */
+// ntfy.sh turns any body over 4096 bytes into an attachment, so the message text never arrives. Stay well under it.
+export const MAX_BODY = 3900;
+const SIG_LEN = 64; // WebCrypto P-256 ECDSA signatures are raw r||s
+const MAX_PLAIN = 256 * 1024; // refuse oversized decompression from anyone holding the key
+const canZip = () => typeof CompressionStream !== 'undefined' && typeof DecompressionStream !== 'undefined';
+async function pipe(bytes: Uint8Array, stream: CompressionStream | DecompressionStream, limit = Infinity): Promise<Uint8Array> {
+    const rd = new Blob([bytes as BlobPart]).stream().pipeThrough(stream).getReader();
+    const parts: Uint8Array[] = []; let len = 0;
+    for (;;) { const { done, value } = await rd.read(); if (done) break; len += value.length; if (len > limit) { void rd.cancel(); throw Error('Message too large'); } parts.push(value); }
+    const out = new Uint8Array(len); let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
+    return out;
+}
+/** Envelope: iv + AES-GCM(flag + signature + body). flag 1 = body is deflate-raw, 0 = plain. The signature covers the uncompressed payload JSON. */
 export async function seal(link: Link, payload: object, signKey: CryptoKey): Promise<string> {
-    const p = JSON.stringify(payload);
-    const s = b64u(await crypto.subtle.sign(SIG, signKey, enc.encode(p)));
+    const p = enc.encode(JSON.stringify(payload));
+    const s = new Uint8Array(await crypto.subtle.sign(SIG, signKey, p));
+    const zip = canZip(); const body = zip ? await pipe(p, new CompressionStream('deflate-raw')) : p;
+    const pt = new Uint8Array(1 + SIG_LEN + body.length); pt[0] = zip ? 1 : 0; pt.set(s, 1); pt.set(body, 1 + SIG_LEN);
     const iv = crypto.getRandomValues(new Uint8Array(12));
-    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await importAes(link.key), enc.encode(JSON.stringify({ p, s }))));
+    const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, await importAes(link.key), pt));
     const out = new Uint8Array(12 + ct.length); out.set(iv); out.set(ct, 12);
     return b64u(out);
 }
@@ -44,8 +58,10 @@ export async function seal(link: Link, payload: object, signKey: CryptoKey): Pro
 export async function open(link: Link, body: string): Promise<{ p: string; s: string; data: any } | null> {
     try {
         const raw = unb64u(body.trim());
-        const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: raw.slice(0, 12) }, await importAes(link.key), raw.slice(12));
-        const { p, s } = JSON.parse(dec.decode(pt));
+        const pt = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: raw.slice(0, 12) }, await importAes(link.key), raw.slice(12)));
+        if (pt.length < 1 + SIG_LEN || pt[0] > 1) return null;
+        const s = b64u(pt.slice(1, 1 + SIG_LEN)); const rest = pt.slice(1 + SIG_LEN);
+        const p = dec.decode(pt[0] === 1 ? await pipe(rest, new DecompressionStream('deflate-raw'), MAX_PLAIN) : rest);
         return { p, s, data: JSON.parse(p) };
     } catch { return null; }
 }
@@ -69,10 +85,10 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** Streaming subscribe with reconnect, replay of the 12h cache, delayed re-poll (the cache is eventually consistent) and dedupe by relay id. */
 export function subscribe(topic: string, onMsg: (body: string) => void, onStatus: (s: 'connecting' | 'live' | 'reconnecting') => void) {
-    let stop = false; const seen = new Set<string>(); let ctl: AbortController | null = null;
+    let stop = false; const seen = new Set<string>(); let ctl: AbortController | null = null; let last = '';
     const deliver = (line: string) => {
         if (!line.trim()) return;
-        try { const e = JSON.parse(line); if (e.event === 'message' && e.id && !seen.has(e.id)) { seen.add(e.id); onMsg(e.message); } } catch { /* ignore */ }
+        try { const e = JSON.parse(line); if (e.event === 'message' && e.id && !seen.has(e.id)) { seen.add(e.id); last = e.id; if (typeof e.message === 'string' && !e.attachment) onMsg(e.message); } } catch { /* ignore */ }
     };
     const poll = async () => { try { const r = await fetch(`${RELAY}/${topic}/json?poll=1&since=all`); (await r.text()).split('\n').forEach(deliver); } catch { /* ignore */ } };
     (async () => {
@@ -80,7 +96,8 @@ export function subscribe(topic: string, onMsg: (body: string) => void, onStatus
         while (!stop) {
             ctl = new AbortController();
             try {
-                const r = await fetch(`${RELAY}/${topic}/json?since=all`, { signal: ctl.signal });
+                // Reconnects resume after the last message seen instead of replaying the whole 12h cache.
+                const r = await fetch(`${RELAY}/${topic}/json?since=${last || 'all'}`, { signal: ctl.signal });
                 if (!r.ok || !r.body) throw new Error(String(r.status));
                 onStatus('live'); delay = 1500;
                 setTimeout(poll, 3500);
@@ -98,17 +115,27 @@ export function subscribe(topic: string, onMsg: (body: string) => void, onStatus
 export type LiveItem = { i: string; n: string; q: number; t: number; e?: 1; c: Record<string, number>; s: string[] };
 export const validUpi = (u?: string) => /^[a-zA-Z0-9._-]{2,64}@[a-zA-Z][a-zA-Z0-9]{1,30}$/.test((u ?? '').trim());
 export type LiveState = { rev: number; open: boolean; final: boolean; items: LiveItem[]; pay?: { n: string; u: string }; people: { i: string; n: string }[]; tot: Record<string, number>; ack: Record<string, number>; rej: Record<string, Record<string, string>>; at: number; settlement?: Settlement; approved?: string[] };
-const CHUNK = 2200;
-export function chunkState(st: LiveState): object[] {
-    const s = JSON.stringify(st); const parts: string[] = [];
-    for (let i = 0; i < s.length; i += CHUNK) parts.push(s.slice(i, i + CHUNK));
+export function chunkState(st: LiveState, n = 1): object[] {
+    const s = JSON.stringify(st); const size = Math.ceil(s.length / n); const parts: string[] = [];
+    for (let i = 0; i < s.length; i += size) parts.push(s.slice(i, i + size));
     return parts.map((d, i) => ({ t: 'state', rev: st.rev, i, n: parts.length, d }));
+}
+/** Seals the state in as few relay messages as possible, each under MAX_BODY. Usually one. */
+export async function sealState(link: Link, hostKey: CryptoKey, st: LiveState): Promise<string[]> {
+    for (let n = 1; n <= 40; n++) {
+        const bodies: string[] = [];
+        for (const m of chunkState(st, n)) { const b = await seal(link, m, hostKey); if (b.length > MAX_BODY) break; bodies.push(b); }
+        if (bodies.length === chunkState(st, n).length) return bodies;
+    }
+    throw Error('Table too large to share live.');
 }
 export class Reassembler {
     private got = new Map<number, string[]>(); latest = -1;
     add(m: { rev: number; i: number; n: number; d: string }): LiveState | null {
-        if (m.rev < this.latest) return null;
+        if (!Number.isSafeInteger(m.rev) || !Number.isInteger(m.n) || m.n < 1 || m.n > 40 || !Number.isInteger(m.i) || m.i < 0 || m.i >= m.n || typeof m.d !== 'string') return null;
+        if (m.rev <= this.latest) return null;
         const a = this.got.get(m.rev) ?? new Array(m.n).fill(null); a[m.i] = m.d; this.got.set(m.rev, a);
+        while (this.got.size > 8) this.got.delete(Math.min(...this.got.keys())); // incomplete revs never pile up
         if (a.every((x) => x !== null)) {
             try { const st = JSON.parse(a.join('')) as LiveState; this.latest = m.rev; for (const k of [...this.got.keys()]) if (k <= m.rev) this.got.delete(k); return st; } catch { return null; }
         }
@@ -185,7 +212,8 @@ export class HostEngine {
         const tot: Record<string, number> = {}; res.people.forEach((p) => (tot[p.id] = p.total));
         const ids = new Set(s.people.map((p) => p.id));
         return {
-            rev: ++this.rev, open: this.open, final: (s.printedTotal == null || s.printedTotal === res.billTotal) && res.reconciles && res.unassigned === 0 && Object.keys(res.unclaimedUnits).length === 0 && s.people.length > 0, at: Date.now(),
+            // Clock-based so a reloaded host (restored from an older save) still outranks what diners last saw.
+            rev: (this.rev = Math.max(this.rev + 1, Date.now())), open: this.open, final: (s.printedTotal == null || s.printedTotal === res.billTotal) && res.reconciles && res.unassigned === 0 && Object.keys(res.unclaimedUnits).length === 0 && s.people.length > 0, at: Date.now(),
             items: s.items.map((it) => ({ i: it.id, n: it.name.slice(0, 40), q: it.qty, t: it.total, ...(it.everyone ? { e: 1 as const } : {}), c: s.claims[it.id] ?? {}, s: s.shares[it.id] ?? [] })),
             ...(s.settlement ? { settlement: s.settlement, approved: (s.approved ?? []).filter((id) => ids.has(id)) } : {}),
             // Live payment links disabled until immutable settlement confirmation is supported.
@@ -220,7 +248,7 @@ export class Diner {
 }
 export async function hostSend(link: Link, hostKey: CryptoKey, st: LiveState): Promise<boolean> {
     let ok = true;
-    for (const m of chunkState(st)) { if (!(await publish(link.topic, await seal(link, m, hostKey)))) ok = false; }
+    for (const b of await sealState(link, hostKey, st)) { if (!(await publish(link.topic, b))) ok = false; }
     return ok;
 }
 /** Diner-side check that a state chunk really came from the host. */
