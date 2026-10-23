@@ -462,3 +462,13 @@ html, body, #root { background: #FBF7ED; }
 .ch-payee { display: grid; gap: 6px; margin: 10px 0; }
 .lv-paybox { align-items: stretch; margin-top: 10px; padding: 10px; border: 1px dashed #1C1917; }
 .lv-paybox .sb-btn { text-align: center; }
+/* Keep receipt cards inside a phone viewport, including long names/messages. */
+.sb-app, .sb-app *, .lv-card, .lv-card * { box-sizing: border-box; }
+.sb-app { min-width: 0; width: 100%; }
+.sb-app > *, .sb-person, .sb-sharepanel, .sb-wa { min-width: 0; max-width: 100%; }
+.sb-wa { overflow-wrap: anywhere; }
+.sb-person-top { flex-wrap: wrap; }
+.sb-pn { overflow-wrap: anywhere; }
+.sb-amt { flex: 0 0 auto; max-width: 100%; }
+.sb-ok { color: #1C1917; background: transparent; border: 1px dashed #8d836f; }
+.ch-owes { font: inherit; color: #4a443d; font-size: 13px; }
