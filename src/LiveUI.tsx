@@ -186,14 +186,13 @@ export function DinerApp({ link }: { link: Link }) {
         {sendFail && <p className="lv-warn" role="alert">Your last pick did not reach the relay. Change anything to retry.</p>}
         {unclaimed.length > 0 && <div className="lv-warn"><b>Nobody has had yet:</b> {unclaimed.map((i) => i.n).join(', ')}</div>}
         <ul className="lv-list">{st!.items.map((i) => {
-            const others = Object.entries(i.c).filter(([k]) => k !== pid).reduce((a: number, [, v]: [string, any]) => a + (v as number), 0); const mine = want[i.i] ?? 0; const shared = sh.includes(i.i); const rej = st!.rej[pid]?.[i.i];
+            const mine = want[i.i] ?? 0; const shared = sh.includes(i.i); const rej = st!.rej[pid]?.[i.i];
             if (i.e) return <li key={i.i}><b>{i.n}</b><span>{fmt(i.t)} split by everyone</span></li>;
-            const max = Math.max(0, i.q - others);
-            return <li key={i.i} className="lv-item"><b>{i.n}</b><span>{fmt(i.t)}{i.q > 1 ? ` for ${i.q}` : ''}{others ? ` · ${others} taken by others` : ''}</span>
-                {i.q > 1 || !shared ? <span className="lv-step"><button type="button" aria-label={`Fewer ${i.n}`} disabled={mine <= 0} onClick={() => push({ ...want, [i.i]: mine - 1 }, sh)}>−</button><output>{mine}</output><button type="button" aria-label={`More ${i.n}`} disabled={mine >= max || shared} onClick={() => push({ ...want, [i.i]: mine + 1 }, sh)}>+</button></span> : null}
-                <button type="button" className={`lv-share ${shared ? 'on' : ''}`} aria-pressed={shared} onClick={() => push({ ...want, [i.i]: 0 }, shared ? sh.filter((x) => x !== i.i) : [...sh, i.i])}>{shared ? 'Sharing ✓' : 'Share'}</button>
+            const eaters = new Set<string>([...i.s, ...Object.keys(i.c).filter((k) => (i.c[k] ?? 0) > 0)]); const legacy = i.s.length === 0 && eaters.size > 0; const on = shared || (legacy && mine > 0); const count = eaters.size + (on && !eaters.has(pid) ? 1 : 0);
+            return <li key={i.i} className="lv-item"><b>{i.n}</b><span style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{fmt(i.t)}{i.q > 1 ? ` · ${i.q} ordered` : ''}<br />{count === 0 ? 'nobody yet' : count === 1 ? 'one eater' : `${count} eating · ${fmt(Math.round(i.t / count))} each`}</span>
+                {legacy ? <em className="lv-rej">Picked by units earlier ({mine ? `you ${mine} of ${i.q}` : 'not you'}). Ask the host to switch it to equal split.</em> : <button type="button" className={`lv-share ${on ? 'on' : ''}`} aria-pressed={on} onClick={() => push({ ...want, [i.i]: 0 }, on ? sh.filter((x) => x !== i.i) : [...sh, i.i])}>{on ? 'I had this ✓' : 'I had this'}</button>}
                 {rej && <em className="lv-rej">{rej}</em>}</li>; })}</ul>
-        <div className="lv-total"><span>{st!.final ? 'Your final amount' : 'Your amount so far'}</span><b>{fmt(st!.tot[pid] ?? 0)}</b><small>{acked ? 'Saved with the host' : 'Sending…'}{!st!.final ? ' · changes if others pick more' : ''}</small></div>
-        <div className="ch-pay lv-paybox" role="status"><p className="sb-small"><b>Pay links are off in QR mode</b></p><p className="sb-small">Your share is shown above. Confirm the final amount and the collector's UPI ID directly with the host, then enter them yourself in your payment app. This build cannot safely keep payment links current when the host edits the bill or collector.</p><p className="sb-muted sb-small">The app cannot verify payments. The collector records received payments by hand.</p></div>
+        <div className="lv-total"><span>Your amount so far</span><b>{fmt(st!.tot[pid] ?? 0)}</b><small>{acked ? 'Saved with the host' : 'Sending…'} · changes if others pick more</small></div>
+        <div className="ch-pay lv-paybox" role="status"><p className="sb-small"><b>Payment comes later</b></p><p className="sb-small">When everyone has picked, the host freezes the table and approves each person one at a time. Your pay button appears here only after the host approves you. Your amount above is provisional until then.</p><p className="sb-muted sb-small">The app cannot verify payments. The collector records received payments by hand.</p></div>
     </section>;
 }
