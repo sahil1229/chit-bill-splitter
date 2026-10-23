@@ -75,8 +75,16 @@ export async function verify(pub: string, p: string, s: string) {
 const busyListeners = new Set<(busy: boolean) => void>();
 export function onRelayBusy(cb: (busy: boolean) => void) { busyListeners.add(cb); return () => { busyListeners.delete(cb); }; }
 const setBusy = (b: boolean) => busyListeners.forEach((cb) => cb(b));
+// This page's own copy of that allowance (kept a little under ntfy's), so it spaces messages out
+// before the relay starts refusing them. Phones sharing one wifi still share the real limit; 429s cover that.
+const bucket = { tokens: 50, at: Date.now() };
+const refill = () => { const now = Date.now(); bucket.tokens = Math.min(50, bucket.tokens + (now - bucket.at) / 5000); bucket.at = now; };
+const spend = () => { refill(); bucket.tokens -= 1; };
+/** Waits until a request fits in the allowance; does not spend it. */
+export async function allowance() { refill(); if (bucket.tokens >= 1) return; const wait = (1 - bucket.tokens) * 5000; if (wait > 2500) setBusy(true); await sleep(wait); }
 export async function publish(topic: string, body: string, tries = 8): Promise<boolean> {
     for (let i = 0; i < tries; i++) {
+        await allowance(); spend();
         try {
             const r = await fetch(`${RELAY}/${topic}`, { method: 'POST', body });
             if (r.ok) { setBusy(false); return true; }
@@ -96,12 +104,12 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * latest state instead of replaying every old one on screen.
  */
 export function subscribe(topic: string, onMsg: (body: string) => void | Promise<void>, onStatus: (s: 'connecting' | 'live' | 'reconnecting') => void, onReady?: () => void) {
-    let stop = false; const seen = new Set<string>(); let ctl: AbortController | null = null; let last = ''; let polled = false;
+    let stop = false; const seen = new Set<string>(); let ctl: AbortController | null = null; let last = '';
     const deliver = (line: string): void | Promise<void> => {
         if (!line.trim()) return;
         try { const e = JSON.parse(line); if (e.event === 'message' && e.id && !seen.has(e.id)) { seen.add(e.id); last = e.id; if (typeof e.message === 'string' && !e.attachment) return onMsg(e.message); } } catch { /* ignore */ }
     };
-    const poll = async () => { try { const r = await fetch(`${RELAY}/${topic}/json?poll=1&since=all`); await Promise.all((await r.text()).split('\n').map(deliver)); } catch { /* ignore */ } };
+    const poll = async () => { try { spend(); const r = await fetch(`${RELAY}/${topic}/json?poll=1&since=all`); await Promise.all((await r.text()).split('\n').map(deliver)); } catch { /* ignore */ } };
     (async () => {
         let delay = 1500; onStatus('connecting');
         await poll(); if (stop) return; onReady?.();
@@ -109,10 +117,9 @@ export function subscribe(topic: string, onMsg: (body: string) => void | Promise
             ctl = new AbortController();
             try {
                 // Reconnects resume after the last message seen instead of replaying the whole 12h cache.
-                const r = await fetch(`${RELAY}/${topic}/json?since=${last || 'all'}`, { signal: ctl.signal });
+                spend(); const r = await fetch(`${RELAY}/${topic}/json?since=${last || 'all'}`, { signal: ctl.signal });
                 if (!r.ok || !r.body) throw new Error(String(r.status));
                 onStatus('live'); delay = 1500;
-                if (!polled) { polled = true; setTimeout(poll, 3500); } // one catch-up poll per page, not per reconnect
                 const rd = r.body.getReader(); let buf = '';
                 for (;;) { const { done, value } = await rd.read(); if (done) break; buf += dec.decode(value, { stream: true }); const lines = buf.split('\n'); buf = lines.pop() ?? ''; lines.forEach(deliver); }
             } catch { /* fallthrough */ }

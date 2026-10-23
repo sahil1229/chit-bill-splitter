@@ -1,7 +1,7 @@
 import { pinDinerPayment, type DinerPayment } from './settlement';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { computeSplit, countedByDefault, fmt, type Item, type Person } from './engine';
-import { onRelayBusy, store, Diner, HostEngine, Reassembler, hostSend, newSession, openHost, linkFragment, parseLink, subscribe, verify, type Link, type LiveState, type Snap, validUpi } from './live';
+import { allowance, onRelayBusy, store, Diner, HostEngine, Reassembler, hostSend, newSession, openHost, linkFragment, parseLink, subscribe, verify, type Link, type LiveState, type Snap, validUpi } from './live';
 import { PayOptions, Qr } from './Pay';
 import { shareBase } from './site';
 
@@ -48,6 +48,8 @@ export function useHost(read: () => HostSnap, write: (p: Partial<Snap>) => void,
     const broadcast = () => {
         clearTimeout(timer.current);
         timer.current = setTimeout(async () => {
+            if (!eng.current || !keys.current) return;
+            await allowance(); // build the update after any wait, so it is never stale
             if (!eng.current || !keys.current) return;
             lastFire.current = Date.now();
             const engine = eng.current; const g = generation.current; const link = engine.link;
