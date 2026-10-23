@@ -1,3 +1,4 @@
+import { scanPhoto } from './ocr';
 import { SettlementJournal } from './settlement-journal';
 import type { Settlement, SettlementDraft } from './settlement';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
@@ -80,10 +81,17 @@ function BillStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
     const [paste, setPaste] = useState('');
     const [photo, setPhoto] = useState<string | null>(null);
     const [note, setNote] = useState('');
+    const [photoFile,setPhotoFile]=useState<File|null>(null);
+    const [scanning,setScanning]=useState(false);
+    const scanRef=useRef<AbortController|null>(null);
+    const scanId=useRef(0);
+    useEffect(()=>()=>{scanId.current++;scanRef.current?.abort();},[]);
+    const scan=async()=>{if(!photoFile||scanning)return;if(paste.trim()&&!window.confirm('Replace the bill text with this photo scan? Your current text will be lost. Existing items stay unchanged until you explicitly read the new text.'))return;const id=++scanId.current;const controller=new AbortController();scanRef.current=controller;setScanning(true);try{const text=await scanPhoto(photoFile,controller.signal,m=>{if(id===scanId.current)setNote(m);});if(id===scanId.current){setPaste(text);setNote('Photo read. Check the text above against your bill, then tap Read items. Nothing has been assigned yet.');}}catch(e){if(id===scanId.current)setNote(e instanceof Error?e.message:'Could not read the photo. Paste text instead.');}finally{if(id===scanId.current){setScanning(false);scanRef.current=null;}}};
     const fileRef = useRef<HTMLInputElement>(null);
     useEffect(() => () => { if (photo) URL.revokeObjectURL(photo); }, [photo]);
 
     const read = (text: string) => {
+        if(s.items.length && !window.confirm('Replace the current bill items and charges? All dish claims and shares will be cleared. People stay. Cancel to keep your current bill.'))return false;
         const r = parseBill(text);
         if (!r.items.length) { setNote('Could not find any dishes with prices in that text. Add them by hand below.'); return; }
         set({ items: r.items, charges: r.charges, printedTotal: r.printedTotal, claims: {}, shares: {}, touched: {} });
@@ -103,17 +111,17 @@ function BillStep({ s, set }: { s: State; set: (p: Partial<State>) => void }) {
                 <li><span>Point the camera at the bill and tap <b>Insert</b>.</span></li>
                 <li><span>Tap <b>Read items</b>, then fix anything that looks off.</span></li>
             </ol>
-            <p className="sb-muted sb-small">Scan Text is iPhone’s own on-device reader, so nothing leaves your phone. Already have a photo? Add it below and copy its text the same way.</p>
-            <input ref={fileRef} type="file" accept="image/*" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) { setPhoto(URL.createObjectURL(f)); setNote(''); } }} />
+            <p className="sb-muted sb-small">Or add a photo below and tap Read photo. English text only. Scanning runs in your browser; the photo is not uploaded. Reader downloads may take time. Always check the result.</p>
+            <input ref={fileRef} type="file" accept="image/jpeg,image/png,image/webp" hidden onChange={(e) => { const f = e.target.files?.[0]; if (f) { scanId.current++;scanRef.current?.abort();setScanning(false);if(!/^image\/(jpeg|png|webp)$/i.test(f.type)||f.size>15*1024*1024){setPhotoFile(null);setPhoto(null);setNote('Choose JPEG, PNG or WebP under 15 MB. HEIC is not supported: use iPhone Live Text or export JPEG.');}else{setPhotoFile(f);setPhoto(URL.createObjectURL(f));setNote('');} }e.target.value=''; }} />
             <div className="sb-row-btns">
                 <button className="sb-btn" type="button" onClick={() => fileRef.current?.click()}>{photo ? 'Change photo' : 'Photo of bill'}</button>
-                <button className="sb-btn sb-ghost" type="button" onClick={() => { setPaste(SAMPLE); read(SAMPLE); }}>Try sample bill</button>
+                <button className="sb-btn sb-ghost" type="button" disabled={scanning} onClick={() => { if(read(SAMPLE)!==false)setPaste(SAMPLE); }}>Try sample bill</button>
             </div>
             {photo && <div className="sb-photo"><img src={photo} alt="The bill you photographed" />
-                <p className="sb-muted sb-small">On iPhone, touch and hold the text in the photo, choose Select All, then Copy. Paste it below. This prototype does not read photos by itself.</p></div>}
+                <button className="sb-btn sb-block" type="button" disabled={scanning} onClick={scan}>{scanning?'Reading photo…':'Read photo on this device'}</button>{scanning&&<button type="button" className="sb-btn sb-ghost" onClick={()=>scanRef.current?.abort()}>Cancel scan</button>}<p className="sb-muted sb-small">Clear, upright JPEG/PNG/WebP under 15 MB. HEIC is not supported here: use iPhone Scan Text or export a JPEG. OCR can misread prices.</p></div>}
             <label className="sb-label" htmlFor="paste">Bill text</label>
-            <textarea id="paste" className="sb-input sb-area" rows={5} placeholder={'2 Butter Chicken 960.00\nService Charge 283.00'} value={paste} onChange={(e) => setPaste(e.target.value)} />
-            <button className="sb-btn sb-block" type="button" disabled={!paste.trim()} onClick={() => read(paste)}>Read items from text</button>
+            <textarea id="paste" disabled={scanning} className="sb-input sb-area" rows={5} placeholder={'2 Butter Chicken 960.00\nService Charge 283.00'} value={paste} onChange={(e) => setPaste(e.target.value)} />
+            <button className="sb-btn sb-block" type="button" disabled={scanning||!paste.trim()} onClick={() => read(paste)}>Read items from text</button>
             {note && <p className="sb-note" role="status">{note}</p>}
         </section>
 
@@ -300,7 +308,7 @@ function SplitStep({ s, set, finalize }: { s: State; set: (p: Partial<State>) =>
     const [msg, setMsg] = useState('');
     const collector = s.externalCollector !== undefined ? { id: '', name: s.externalCollector } : s.people.find((p) => p.id === s.collectorId);
     const unclaimedList = s.items.filter((i) => !i.everyone && (res.unclaimedUnits[i.id] ?? 0) > 0);
-    const payers = res.people.filter((p) => p.id !== s.collectorId);
+    const payers = res.people.filter((p) => p.id !== s.collectorId && p.total > 0);
     const owed = payers.reduce((a, b) => a + b.total, 0);
     const rk = (n: number) => `${s.settlement?.id ?? 'draft'}|${n}|${s.collectorId}|${s.externalCollector ?? ''}|${s.upi.trim().toLowerCase()}`;
     useEffect(() => { const bad = Object.keys(s.received).filter((id) => s.received[id] && (id === s.collectorId || s.received[id] !== rk(res.people.find((p) => p.id === id)?.total ?? -1))); if (bad.length) set({ received: Object.fromEntries(Object.entries(s.received).filter(([id]) => !bad.includes(id))) }); }, [s.received, s.collectorId, s.upi, res]);
@@ -365,19 +373,19 @@ function SplitStep({ s, set, finalize }: { s: State; set: (p: Partial<State>) =>
                 return <li key={p.id} className={`sb-person${done ? ' is-paid' : ''}`} style={{ ['--who' as string]: hue(p.id, s.people) }}>
                     <button type="button" className="sb-person-top" aria-expanded={open === p.id} onClick={() => setOpen(open === p.id ? null : p.id)}>
                         <Avatar p={person} people={s.people} />
-                        <span className="sb-pn"><strong>{p.name}</strong><span className="sb-muted sb-small">{isCollector ? 'Collecting the money' : done ? 'Marked as received' : stale ? `Amount or payee changed after you ticked it. Owes ${collector?.name ?? ''}` : `Owes ${collector?.name ?? ''}`}</span></span>
+                        <span className="sb-pn"><strong>{p.name}</strong><span className="sb-muted sb-small">{isCollector ? 'Collecting the money' : p.total <= 0 ? 'Nothing to pay' : done ? 'Marked as received' : stale ? `Amount or payee changed after you ticked it. Owes ${collector?.name ?? ''}` : `Owes ${collector?.name ?? ''}`}</span></span>
                         <strong className="sb-amt">{fmt(p.total)}</strong>
                     </button>
-                    {done && !isCollector && <span className="ch-stamp" aria-label="Marked collected by hand">COLLECTED</span>}
-                    {!done && !isCollector && <span className="ch-note ch-owes">owes, no stamp yet</span>}
+                    {done && !isCollector && p.total > 0 && <span className="ch-stamp" aria-label="Marked collected by hand">COLLECTED</span>}
+                    {!done && !isCollector && p.total > 0 && <span className="ch-note ch-owes">owes, no stamp yet</span>}
                     {open === p.id && <div className="sb-break">
                         {p.lines.map((l, i) => <div key={i} className="sb-bl"><span>{l.name} <em>{l.note}</em></span><span>{fmt(l.amount)}</span></div>)}
                         {res.chargeLines.map((c) => <div key={c.id} className="sb-bl sb-muted"><span>{c.name}</span><span>{fmt(c.perPerson[res.people.indexOf(p)] ?? 0)}</span></div>)}
                         <div className="sb-bl sb-sum"><span>Total</span><span>{fmt(p.total)}</span></div>
                     </div>}
                     {!isCollector && <div className="sb-pay">
-                        {!fin.ok ? <p className="sb-small sb-muted">Amount not final yet.</p> : done ? <p className="sb-small sb-muted">Received. Nothing more to pay.</p> : validUpi(s.upi) && s.settlement ? <span className="ch-pay"><a className="sb-btn sb-small-btn sb-a" href={upiLink(p.total).replace('upi://', 'gpay://upi/')}>Open Google Pay · {fmt(p.total)}</a><a className="sb-link" href={upiLink(p.total)}>Other UPI app</a><button type="button" className="sb-link" onClick={async () => { try { await navigator.clipboard.writeText(`${s.upi.trim()} ${(p.total / 100).toFixed(2)}`); setMsg('Copied UPI ID and amount. Paste them into any UPI app.'); } catch { setMsg(`UPI ID ${s.upi.trim()}, amount ${(p.total / 100).toFixed(2)}`); } }}>Copy ID + amount</button></span> : !s.settlement ? <p className="sb-small sb-muted">Finalize the table before showing payment instructions.</p> : <button type="button" className="sb-btn sb-small-btn" onClick={() => request(p)}>Request {fmt(p.total)}</button>}
-                        <button type="button" role="switch" disabled={!s.settlement} aria-checked={done} className={`sb-got${done ? ' on' : ''}`} onClick={() => set({ received: { ...s.received, [p.id]: done ? 0 : rk(p.total) } })}>{done ? '✓ Received' : 'Mark received'}</button>
+                        {!fin.ok ? <p className="sb-small sb-muted">Amount not final yet.</p> : p.total <= 0 ? <p className="sb-small sb-muted">Nothing to pay.</p> : done ? <p className="sb-small sb-muted">Received. Nothing more to pay.</p> : validUpi(s.upi) && s.settlement ? <span className="ch-pay"><a className="sb-btn sb-small-btn sb-a" href={upiLink(p.total).replace('upi://', 'gpay://upi/')}>Open Google Pay · {fmt(p.total)}</a><a className="sb-link" href={upiLink(p.total)}>Other UPI app</a><button type="button" className="sb-link" onClick={async () => { try { await navigator.clipboard.writeText(`${s.upi.trim()} ${(p.total / 100).toFixed(2)}`); setMsg('Copied UPI ID and amount. Paste them into any UPI app.'); } catch { setMsg(`UPI ID ${s.upi.trim()}, amount ${(p.total / 100).toFixed(2)}`); } }}>Copy ID + amount</button></span> : !s.settlement ? <p className="sb-small sb-muted">Finalize the table before showing payment instructions.</p> : <button type="button" className="sb-btn sb-small-btn" onClick={() => request(p)}>Request {fmt(p.total)}</button>}
+                        {p.total > 0 && <button type="button" role="switch" disabled={!s.settlement} aria-checked={done} className={`sb-got${done ? ' on' : ''}`} onClick={() => set({ received: { ...s.received, [p.id]: done ? 0 : rk(p.total) } })}>{done ? '✓ Received' : 'Mark received'}</button>}
                     </div>}
                 </li>;
             })}
@@ -472,4 +480,4 @@ function Host({ onJoin }: { onJoin: (l: NonNullable<ReturnType<typeof envLink>>)
             {meta.message && <p className="sb-muted sb-small">{meta.message}</p>}
         </div>
     </FileCard>;
-                           }
+        }
