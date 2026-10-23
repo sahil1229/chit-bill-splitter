@@ -8,6 +8,7 @@ export type ReportInput = {
     collectorId: string;
     upi: string;
     received: Record<string, boolean>;
+    printedTotal?: number | null;
     chargeMode: 'equal' | 'prorata';
     spread: boolean;
     date: string;
@@ -19,6 +20,8 @@ export function isFinal(r: ReportInput): { ok: boolean; why: string } {
     if (!r.people.some((p) => p.id === r.collectorId)) return { ok: false, why: 'Choose who is collecting the money.' };
     if (r.res.overclaimed.length) return { ok: false, why: 'Some dishes are claimed more times than served. Fix those first.' };
     if (r.res.unassigned !== 0) return { ok: false, why: `${fmt(r.res.unassigned)} is not assigned yet. Claim it or split it equally first.` };
+    if (!r.spread && Object.keys(r.res.unclaimedUnits ?? {}).length) return { ok: false, why: 'Some dishes still have unclaimed units. Claim them or mark the dish Everyone/Share first.' };
+    if (r.printedTotal != null && r.printedTotal !== r.res.billTotal) return { ok: false, why: 'The bill total does not match the printed total. Fix the items or charges first.' };
     if (!r.res.reconciles) return { ok: false, why: 'The shares do not add up to the bill yet.' };
     return { ok: true, why: '' };
 }
@@ -111,20 +114,27 @@ export function buildPdf(r: ReportInput): Uint8Array {
     text('WHO OWES WHAT', M, y, 'F2', 12); y -= 8;
     const rows = r.res.people;
     const sh = 20;
-    rect(M, y - sh * (rows.length + 1), W - 2 * M, sh * (rows.length + 1), '#FFFDF6', 2);
-    rect(M, y - sh, W - 2 * M, sh, '#1C1917');
-    text('Person', M + 8, y - 14, 'F2', 9.5, '#FBF7ED');
-    text('Status (ticked by hand)', M + 200, y - 14, 'F2', 9.5, '#FBF7ED');
-    text('Amount', W - M - 70, y - 14, 'F2', 9.5, '#FBF7ED');
-    rows.forEach((p, i) => {
-        const yy = y - sh * (i + 2) + 6;
+    const tHead = () => {
+        rect(M, y - sh, W - 2 * M, sh, '#1C1917');
+        text('Person', M + 8, y - 14, 'F2', 9.5, '#FBF7ED');
+        text('Status (ticked by hand)', M + 200, y - 14, 'F2', 9.5, '#FBF7ED');
+        text('Amount', W - M - 70, y - 14, 'F2', 9.5, '#FBF7ED');
+        y -= sh;
+    };
+    need(sh * 3); tHead();
+    rows.forEach((p) => {
+        if (y - sh < M + 36) { newPage(); tHead(); }
+        const yy = y - 14;
+        rect(M, y - sh, W - 2 * M, sh, '#FFFDF6', 1);
         const st = statusOf(r, p.id);
         text(p.name, M + 8, yy, 'F2', 10.5);
         text(st === 'collecting' ? 'collecting (own share)' : st === 'received' ? 'COLLECTED (ticked)' : 'owes, not yet ticked', M + 200, yy, st === 'received' ? 'F2' : 'F1', 9.5, st === 'received' ? '#C2402A' : '#1C1917');
         mono(money(p.total), W - M - 8, yy, 10, true);
+        y -= sh;
     });
-    y -= sh * (rows.length + 1) + 6;
+    y -= 6;
     const tot = rows.reduce((a, b) => a + b.total, 0);
+    need(60);
     text('All shares added up', M + 8, y - 8, 'F1', 9.5);
     mono(money(tot), W - M - 8, y - 8, 10, true);
     y -= 22;
@@ -132,6 +142,7 @@ export function buildPdf(r: ReportInput): Uint8Array {
     y -= 26;
 
     // how charges are split
+    need(60);
     text('HOW IT WAS CALCULATED', M, y, 'F2', 12); y -= 15;
     const notes = [
         'Each dish is divided by the units each person took. Dishes marked "shared by N" are split equally among the people picked.',
@@ -141,8 +152,8 @@ export function buildPdf(r: ReportInput): Uint8Array {
     if (r.spread) notes.push('Dishes nobody claimed were split equally between everyone.');
     for (const n of notes) {
         const words = n.split(' '); let line = '';
-        for (const w of words) { if ((line + ' ' + w).length > 82) { text(line, M, y, 'F1', 9.5); y -= 12; line = w; } else line = line ? line + ' ' + w : w; }
-        text(line, M, y, 'F1', 9.5); y -= 14;
+        for (const w of words) { if ((line + ' ' + w).length > 82) { need(14); text(line, M, y, 'F1', 9.5); y -= 12; line = w; } else line = line ? line + ' ' + w : w; }
+        need(16); text(line, M, y, 'F1', 9.5); y -= 14;
     }
     y -= 8;
     // bill items
@@ -161,19 +172,26 @@ export function buildPdf(r: ReportInput): Uint8Array {
     // per person
     const palette = ['#EFE6D0'];
     r.res.people.forEach((p, idx) => {
-        const lines = p.lines.length;
-        const cl = r.res.chargeLines.filter((c) => (c.perPerson[idx] ?? 0) !== 0).length;
-        const h = 34 + (lines + cl + 1) * 14 + 6;
-        need(h + 8);
-        rect(M, y - h, W - 2 * M, h, '#FFFDF6', 2);
-        rect(M, y - 26, W - 2 * M, 26, palette[idx % palette.length], 2);
-        text(p.name, M + 10, y - 18, 'F2', 13);
-        mono(money(p.total), W - M - 10, y - 18, 13, true);
-        let yy = y - 42;
-        for (const l of p.lines) { text(`${l.name}  (${l.note})`, M + 12, yy, 'F1', 9.5); mono(money(l.amount), W - M - 12, yy, 9.5); yy -= 14; }
-        r.res.chargeLines.forEach((c) => { const a = c.perPerson[idx] ?? 0; if (a !== 0) { text(c.name, M + 12, yy, 'F1', 9.5, '#444444'); mono(money(a), W - M - 12, yy, 9.5); yy -= 14; } });
-        text('Total', M + 12, yy, 'F2', 10); mono(money(p.total), W - M - 12, yy, 10, true);
-        y -= h + 12;
+        type Row = { label: string; amt: number; grey?: boolean };
+        const entries: Row[] = [...p.lines.map((l) => ({ label: `${l.name}  (${l.note})`, amt: l.amount }))];
+        r.res.chargeLines.forEach((c) => { const a = c.perPerson[idx] ?? 0; if (a !== 0) entries.push({ label: c.name, amt: a, grey: true }); });
+        let i = 0; let first = true;
+        while (true) {
+            if (y - (26 + 14 * 3 + 20) < M + 30) newPage();
+            const room = Math.floor((y - (M + 30) - 42 - 16) / 14);
+            const take = Math.max(1, Math.min(entries.length - i, room));
+            const last = i + take >= entries.length;
+            const h = 34 + (take + (last ? 1 : 0)) * 14 + 6;
+            rect(M, y - h, W - 2 * M, h, '#FFFDF6', 2);
+            rect(M, y - 26, W - 2 * M, 26, palette[idx % palette.length], 2);
+            text(first ? p.name : `${p.name} (continued)`, M + 10, y - 18, 'F2', 13);
+            mono(money(p.total), W - M - 10, y - 18, 13, true);
+            let yy = y - 42;
+            for (const row of entries.slice(i, i + take)) { text(row.label, M + 12, yy, 'F1', 9.5, row.grey ? '#444444' : '#1C1917'); mono(money(row.amt), W - M - 12, yy, 9.5); yy -= 14; }
+            if (last) { text('Total', M + 12, yy, 'F2', 10); mono(money(p.total), W - M - 12, yy, 10, true); }
+            y -= h + 12; i += take; first = false;
+            if (last) break;
+        }
     });
 
     if (y - 30 < 34) newPage();
